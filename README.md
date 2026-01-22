@@ -12,7 +12,7 @@ Customers who require the full functionality of the Speech SDK and/or want to us
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](SUPPORT.md#contributing) for details.
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
 Please note that this project follows the [Microsoft Open Source Code of Conduct](CODE_OF_CONDUCT.md).
 
