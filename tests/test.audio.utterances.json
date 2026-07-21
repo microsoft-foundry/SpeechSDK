@@ -1,0 +1,29 @@
+{
+  "SingleUtteranceEnglish": {
+    "FilePath": "audio/whatstheweatherlike.wav",
+    "NativeLanguage": "en-US",
+    "Utterances": {
+      "en-US": [
+        {
+          "Text": "What's the weather like?"
+        }
+      ],
+      "de": [
+        {
+          "Text": "Wie ist das Wetter?"
+        }
+      ],
+      "zh-CN": [
+        {
+          "Text": "天气如何？"
+        }
+      ]
+    }
+  },
+  "EmptyWavFile": {
+    "FilePath": "audio/empty.wav"
+  },
+  "NonLatinFileName": {
+    "FilePath": "audio/hi-IN_0_नमस्कार.wav"
+  }
+}

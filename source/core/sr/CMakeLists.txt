@@ -1,0 +1,154 @@
+#
+# Copyright (c) Microsoft. All rights reserved.
+# Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+#
+project(sr)
+
+set(SRC_DIR "${PROJECT_SOURCE_DIR}")
+set(INC_DIR "${PROJECT_SOURCE_DIR}/include")
+
+set(HEADERS
+    "${INC_DIR}/speech_api_factory.h"
+)
+
+set(HEADERS_PRIVATE
+    "${SRC_DIR}/stdafx.h"
+    "${SRC_DIR}/activity_event_args.h"
+    "${SRC_DIR}/activity_session.h"
+    "${SRC_DIR}/turn_status_event_args.h"
+    "${SRC_DIR}/audio_stream_session.h"
+    "${SRC_DIR}/audio_stream_session_throttle_logic.h"
+    "${SRC_DIR}/dialog_service_connector.h"
+    "${SRC_DIR}/create_module_object.h"
+    "${SRC_DIR}/keyword_spotter_model.h"
+    "${SRC_DIR}/phrase.h"
+    "${SRC_DIR}/phrase_list_impl.h"
+    "${SRC_DIR}/phrase_list_grammar.h"
+    "${SRC_DIR}/recognition_event_args.h"
+    "${SRC_DIR}/recognition_result.h"
+    "${SRC_DIR}/recognizer.h"
+    "${SRC_DIR}/connection.h"
+    "${SRC_DIR}/connection_event_args.h"
+    "${SRC_DIR}/connection_message.h"
+    "${SRC_DIR}/connection_message_event_args.h"
+    "${SRC_DIR}/session_event_args.h"
+    "${SRC_DIR}/token_request_event_args.h"
+    "${SRC_DIR}/reco_engine_adapter_helpers.h"
+    "${SRC_DIR}/usp_reco_engine_adapter.h"
+    "${SRC_DIR}/usp_reco_engine_adapter_retry.h"
+    "${SRC_DIR}/hybrid_reco_engine_adapter.h"
+    "${SRC_DIR}/translation_recognizer.h"
+    "${SRC_DIR}/audio_buffer.h"
+    "${SRC_DIR}/conversation_transcriber_v2.h"
+    "${SRC_DIR}/meeting_transcriber.h"
+    "${SRC_DIR}/meeting.h"
+    "${SRC_DIR}/user.h"
+    "${SRC_DIR}/participant.h"
+    "${SRC_DIR}/stored_grammar.h"
+    "${SRC_DIR}/class_language_model.h"
+    "${SRC_DIR}/speech_config.h"
+    "${SRC_DIR}/speech_translation_config.h"
+    "${SRC_DIR}/language_list_utils.h"
+    "${SRC_DIR}/auto_detect_source_lang_config.h"
+    "${SRC_DIR}/interaction_id_provider.h"
+    "${SRC_DIR}/source_lang_config.h"
+    "${SRC_DIR}/source_language_recognizer.h"
+    "${SRC_DIR}/meeting_participants_mgr.h"
+    "${SRC_DIR}/audio_source_notify_me_track_delegate_impl.h"
+    "${SRC_DIR}/audio_source_notify_me_tracker.h"
+    "${SRC_DIR}/session_audio_source_helper.h"
+    "${SRC_DIR}/audio_session_shim.h"
+    "${SRC_DIR}/speech_audio_processor.h"
+    "${SRC_DIR}/output_reco_adapter.h"
+    "${SRC_DIR}/pronunciation_assessment_config.h"
+    "${SRC_DIR}/embedded_speech_config.h"
+    "${SRC_DIR}/speech_recognition_model.h"
+    "${SRC_DIR}/speech_translation_model.h"
+    "${SRC_DIR}/compressed_audio_adapter.h"
+    "${SRC_DIR}/reco_engine_adapter_delegate_helper.h"
+    "${SRC_DIR}/reco_engine_adapter_delegate_impl.h"
+    "${SRC_DIR}/audio_processor_delegate_impl.h"
+    "${SRC_DIR}/audio_processor_delegate_helper.h"
+    "${SRC_DIR}/reco_engine_adapter_site_delegate_helper.h"
+    "${SRC_DIR}/reco_engine_adapter_site_delegate_impl.h"
+    "${SRC_DIR}/audio_replayer_delegate_helper.h"
+    "${SRC_DIR}/audio_replayer_delegate_impl.h"
+
+    )
+
+set(SOURCES
+    "${SRC_DIR}/activity_event_args.cpp"
+    "${SRC_DIR}/activity_session.cpp"
+    "${SRC_DIR}/turn_status_event_args.cpp"
+    "${SRC_DIR}/audio_stream_session.cpp"
+    "${SRC_DIR}/audio_stream_session_throttle_logic.cpp"
+    "${SRC_DIR}/dialog_service_connector.cpp"
+    "${SRC_DIR}/create_module_object.cpp"
+    "${SRC_DIR}/speech_api_factory.cpp"
+    "${SRC_DIR}/keyword_spotter_model.cpp"
+    "${SRC_DIR}/phrase.cpp"
+    "${SRC_DIR}/recognition_event_args.cpp"
+    "${SRC_DIR}/recognition_result.cpp"
+    "${SRC_DIR}/recognizer.cpp"
+    "${SRC_DIR}/connection.cpp"
+    "${SRC_DIR}/connection_event_args.cpp"
+    "${SRC_DIR}/connection_message.cpp"
+    "${SRC_DIR}/connection_message_event_args.cpp"
+    "${SRC_DIR}/session_event_args.cpp"
+    "${SRC_DIR}/token_request_event_args.cpp"
+    "${SRC_DIR}/reco_engine_adapter_helpers.cpp"
+    "${SRC_DIR}/usp_reco_engine_adapter.cpp"
+    "${SRC_DIR}/usp_reco_engine_adapter_retry.cpp"
+    "${SRC_DIR}/hybrid_reco_engine_adapter.cpp"
+    "${SRC_DIR}/translation_recognizer.cpp"
+    "${SRC_DIR}/audio_buffer.cpp"
+    "${SRC_DIR}/conversation_transcriber_v2.cpp"
+    "${SRC_DIR}/meeting_transcriber.cpp"
+    "${SRC_DIR}/meeting.cpp"
+    "${SRC_DIR}/user.cpp"
+    "${SRC_DIR}/participant.cpp"
+    "${SRC_DIR}/stored_grammar.cpp"
+    "${SRC_DIR}/class_language_model.cpp"
+    "${SRC_DIR}/speech_config.cpp"
+    "${SRC_DIR}/speech_translation_config.cpp"
+    "${SRC_DIR}/language_list_utils.cpp"
+    "${SRC_DIR}/auto_detect_source_lang_config.cpp"
+    "${SRC_DIR}/source_lang_config.cpp"
+    "${SRC_DIR}/source_language_recognizer.cpp"
+    "${SRC_DIR}/meeting_participants_mgr.cpp"
+    "${SRC_DIR}/audio_session_shim.cpp"
+    "${SRC_DIR}/speech_audio_processor.cpp"
+    "${SRC_DIR}/output_reco_adapter.cpp"
+    "${SRC_DIR}/pronunciation_assessment_config.cpp"
+    "${SRC_DIR}/embedded_speech_config.cpp"
+    "${SRC_DIR}/speech_recognition_model.cpp"
+    "${SRC_DIR}/speech_translation_model.cpp"
+    "${SRC_DIR}/compressed_audio_adapter.cpp"
+    )
+
+set_source_groups()
+
+add_library(sr STATIC ${HEADERS} ${HEADERS_PRIVATE} ${SOURCES})
+
+target_include_directories(sr
+    PRIVATE
+        ${CARBON_C_API}
+        ${CARBON_CXX_API}
+        ${CARBON_JSON_PARSER}
+        ${COMMON_GENERATED_INCLUDE}
+    PUBLIC
+        ${INC_DIR}
+)
+
+add_security_compile_flags(${PROJECT_NAME})
+
+set_target_properties (sr PROPERTIES
+    FOLDER core
+)
+
+target_link_libraries(sr PRIVATE interfaces usp common pal)
+
+if (WIN32)
+    # ARM builds don't automatically add the needed library for Windows trace logging
+    target_link_libraries(sr PRIVATE advapi32.lib)
+endif()

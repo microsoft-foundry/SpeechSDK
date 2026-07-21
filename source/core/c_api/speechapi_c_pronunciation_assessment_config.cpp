@@ -1,0 +1,142 @@
+//
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+//
+
+#include "stdafx.h"
+#include "common.h"
+#include "speechapi_c_pronunciation_assessment_config.h"
+#include "create_object_helpers.h"
+#include "event_helpers.h"
+#include "handle_helpers.h"
+#include "platform.h"
+#include "site_helpers.h"
+#include "handle_table.h"
+#include "property_id_2_name_map.h"
+
+using namespace Microsoft::CognitiveServices::Speech::Impl;
+using namespace Microsoft::CognitiveServices::Speech;
+
+static_assert(static_cast<int>(PronunciationAssessmentGradingSystem_FivePoint) ==
+        static_cast<int>(PronunciationAssessmentGradingSystem::FivePoint),
+    "PronunciationAssessmentGradingSystem_* enum values == PronunciationAssessmentGradingSystem::* enum values");
+static_assert(static_cast<int>(PronunciationAssessmentGradingSystem_HundredMark) ==
+    static_cast<int>(PronunciationAssessmentGradingSystem::HundredMark),
+    "PronunciationAssessmentGradingSystem_* enum values == PronunciationAssessmentGradingSystem::* enum values");
+
+static_assert(static_cast<int>(PronunciationAssessmentGranularity_Phoneme) ==
+    static_cast<int>(PronunciationAssessmentGranularity::Phoneme),
+    "PronunciationAssessmentGranularity_* enum values == PronunciationAssessmentGranularity::* enum values");
+static_assert(static_cast<int>(PronunciationAssessmentGranularity_Word) ==
+    static_cast<int>(PronunciationAssessmentGranularity::Word),
+    "PronunciationAssessmentGranularity_* enum values == PronunciationAssessmentGranularity::* enum values");
+static_assert(static_cast<int>(PronunciationAssessmentGranularity_FullText) ==
+    static_cast<int>(PronunciationAssessmentGranularity::FullText),
+    "PronunciationAssessmentGranularity_* enum values == PronunciationAssessmentGranularity::* enum values");
+
+SPXAPI create_pronunciation_assessment_config(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE* hPronunciationAssessmentConfig,
+                                              const char* referenceText,
+                                              Pronunciation_Assessment_Grading_System gradingSystem,
+                                              Pronunciation_Assessment_Granularity granularity,
+                                              bool enableMiscue)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, hPronunciationAssessmentConfig == nullptr);
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        *hPronunciationAssessmentConfig = SPXHANDLE_INVALID;
+
+        auto pronunciationAssessmentConfig = SpxCreateObjectWithSite<ISpxPronunciationAssessmentConfig>("CSpxPronunciationAssessmentConfig", SpxGetRootSite());
+        pronunciationAssessmentConfig->InitWithParameters(referenceText,
+                                                         static_cast<PronunciationAssessmentGradingSystem>(gradingSystem),
+                                                         static_cast<PronunciationAssessmentGranularity>(granularity),
+                                                         enableMiscue);
+
+        auto pronunciationAssessmentConfigs = CSpxSharedPtrHandleTableManager::Get<ISpxPronunciationAssessmentConfig, SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE>();
+        *hPronunciationAssessmentConfig = pronunciationAssessmentConfigs->TrackHandle(pronunciationAssessmentConfig);
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
+SPXAPI create_pronunciation_assessment_config_from_json(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE* hPronunciationAssessmentConfig, const char* json)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, json == nullptr || !(*json));
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, hPronunciationAssessmentConfig == nullptr);
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        *hPronunciationAssessmentConfig = SPXHANDLE_INVALID;
+
+        auto pronunciationAssessmentConfig = SpxCreateObjectWithSite<ISpxPronunciationAssessmentConfig>("CSpxPronunciationAssessmentConfig", SpxGetRootSite());
+        pronunciationAssessmentConfig->InitFromJson(json);
+
+        auto pronunciationAssessmentConfigs = CSpxSharedPtrHandleTableManager::Get<ISpxPronunciationAssessmentConfig, SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE>();
+        *hPronunciationAssessmentConfig = pronunciationAssessmentConfigs->TrackHandle(pronunciationAssessmentConfig);
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
+SPXAPI_(bool) pronunciation_assessment_config_is_handle_valid(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE hPronunciationAssessmentConfig)
+{
+    return CSpxApiManager::IsValid<SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE, ISpxPronunciationAssessmentConfig>(hPronunciationAssessmentConfig);
+}
+
+SPXAPI pronunciation_assessment_config_release(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE hPronunciationAssessmentConfig)
+{
+    return CSpxApiManager::ReleaseAlwaysNoError<SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE, ISpxPronunciationAssessmentConfig>(hPronunciationAssessmentConfig);
+}
+
+SPXAPI pronunciation_assessment_config_get_property_bag(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE hPronunciationAssessmentConfig, SPXPROPERTYBAGHANDLE* hpropbag)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, !pronunciation_assessment_config_is_handle_valid(hPronunciationAssessmentConfig));
+    return CSpxApiManager::QueryService<SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE, ISpxPronunciationAssessmentConfig, SPXPROPERTYBAGHANDLE, ISpxNamedProperties>(hPronunciationAssessmentConfig, hpropbag);
+}
+
+SPXAPI__(const char*) pronunciation_assessment_config_to_json(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE hPronunciationAssessmentConfig)
+{
+    char* result = nullptr;
+
+    if (hPronunciationAssessmentConfig == nullptr)
+    {
+        return result;
+    }
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto config = SpxGetPtrFromHandle<ISpxPronunciationAssessmentConfig>(hPronunciationAssessmentConfig);
+
+        config->UpdateJson();
+        const auto namedProperties = SpxQueryInterface<ISpxNamedProperties>(config);
+
+        const auto tempValue = namedProperties->GetOr(PropertyId::PronunciationAssessment_Params, "");
+        const auto size = tempValue.size() + 1;
+
+        result = new char[size];
+        PAL::strcpy(result, size, tempValue.c_str(), size, true);
+    }
+    SPXAPI_CATCH_AND_RETURN(hr, result);
+}
+
+SPXAPI pronunciation_assessment_config_apply_to_recognizer(SPXPRONUNCIATIONASSESSMENTCONFIGHANDLE hPronunciationAssessmentConfig, SPXRECOHANDLE hreco)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, !pronunciation_assessment_config_is_handle_valid(hPronunciationAssessmentConfig));
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, !recognizer_handle_is_valid(hreco));
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        const auto recognizer = SpxGetPtrFromHandle<ISpxRecognizer>(hreco);
+        auto config = SpxGetPtrFromHandle<ISpxPronunciationAssessmentConfig>(hPronunciationAssessmentConfig);
+        config->UpdateJson();
+        auto recognizerProperties = SpxQueryInterface<ISpxNamedProperties>(recognizer);
+        const auto configProperties = SpxQueryInterface<ISpxNamedProperties>(config);
+        recognizerProperties->Set(
+            PropertyId::PronunciationAssessment_Params,
+            configProperties->GetOr(PropertyId::PronunciationAssessment_Params, "").c_str());
+        // Request SNR for pronunciation assessment.
+        if (recognizerProperties->GetOr(PropertyId::SpeechServiceResponse_RequestSnr, "").empty())
+        {
+            recognizerProperties->Set(PropertyId::SpeechServiceResponse_RequestSnr, "true");
+        }
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}

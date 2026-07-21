@@ -1,0 +1,463 @@
+[Catch2 PATCH] Add file-backed OutputRedirect for crash recovery
+
+Add a process-wide named-file capture mechanism for stdout/stderr,
+enabling crash-recovery post-processing that requires the captured
+output to outlive the test process. Two new framework CLI flags expose
+this:
+
+  --standard-out-redirect-file <path>
+  --standard-err-redirect-file <path>
+
+When either flag is set, an OutputRedirectSink is constructed at CLI
+parse time and stored in Config. The sink dup2's the named file over the
+corresponding file descriptor (1 or 2) for the entire process lifetime,
+disables stdio buffering on the source FILE* via setvbuf(_IONBF), and
+exposes position-based content reads via getLatestContents() and
+getContentsFromPosition(). When the sink is destroyed at process exit,
+the original FD target is restored.
+
+The reporter takes ownership of the sinks at reporter-construction time
+(see VstestReporter); RunContext consults the sink presence to determine
+whether to construct a per-test OutputRedirect (skipped when sinks
+active).
+
+Files modified:
+  src/catch2/internal/catch_output_redirect.{hpp,cpp}
+    - TempFile gains reopen(), getPath(), getContents(int startPosition);
+      m_isOwnedTmpFile renamed to m_shouldAutomaticallyDelete; ctor takes
+      std::string by value and stores m_filePath
+    - New OutputRedirectSink class (process-wide redirect)
+    - OutputRedirect refactored to compose two OutputRedirectSink members
+      using anonymous tmpfiles (when no process-wide sinks active)
+
+  src/catch2/internal/catch_commandline.cpp
+    - Two CLI handlers construct OutputRedirectSink at parse time and
+      store raw pointer in Config
+
+  src/catch2/catch_config.{hpp,cpp}
+  src/catch2/interfaces/catch_interfaces_config.hpp
+    - ConfigData fields and IConfig/Config accessors return
+      OutputRedirectSink* (not std::string paths)
+
+  src/catch2/internal/catch_run_context.cpp
+    - runCurrentTest skips per-test OutputRedirect when either
+      process-wide sink is set; reporter reads sink content via
+      position-based getLatestContents() at section traversal completion
+
+The new code is gated on CATCH_CONFIG_EXPERIMENTAL_REDIRECT (which the
+SDK defines via target_compile_definitions, and which auto-defines
+CATCH_CONFIG_NEW_CAPTURE for the underlying redirect mechanism).
+---
+ src/catch2/catch_config.cpp                   |   5 +
+ src/catch2/catch_config.hpp                   |  12 ++
+ .../interfaces/catch_interfaces_config.hpp    |   7 +
+ src/catch2/internal/catch_commandline.cpp     |  13 ++
+ src/catch2/internal/catch_output_redirect.cpp | 155 +++++++++++++-----
+ src/catch2/internal/catch_output_redirect.hpp |  42 ++++-
+ src/catch2/internal/catch_run_context.cpp     |  12 +-
+ 7 files changed, 199 insertions(+), 47 deletions(-)
+
+diff --git a/src/catch2/catch_config.cpp b/src/catch2/catch_config.cpp
+index 352c1f42..b5d8af15 100644
+--- a/src/catch2/catch_config.cpp
++++ b/src/catch2/catch_config.cpp
+@@ -246,4 +246,9 @@ namespace Catch {
+         }
+     }
+ 
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++    OutputRedirectSink* Config::standardOutputRedirect() const { return m_data.standardOutputRedirect; }
++    OutputRedirectSink* Config::standardErrorRedirect() const { return m_data.standardErrorRedirect; }
++#endif
++
+ } // end namespace Catch
+diff --git a/src/catch2/catch_config.hpp b/src/catch2/catch_config.hpp
+index 17e983e5..14af50f0 100644
+--- a/src/catch2/catch_config.hpp
++++ b/src/catch2/catch_config.hpp
+@@ -23,6 +23,8 @@
+ 
+ namespace Catch {
+ 
++    class OutputRedirectSink;
++
+     class IStream;
+ 
+     /**
+@@ -87,6 +89,11 @@ namespace Catch {
+ 
+         std::vector<std::string> testsOrTags;
+         std::vector<std::string> sectionsToRun;
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        OutputRedirectSink* standardOutputRedirect = nullptr;
++        OutputRedirectSink* standardErrorRedirect = nullptr;
++#endif
+     };
+ 
+ 
+@@ -139,6 +146,11 @@ namespace Catch {
+         unsigned int benchmarkResamples() const override;
+         std::chrono::milliseconds benchmarkWarmupTime() const override;
+ 
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        OutputRedirectSink* standardOutputRedirect() const override;
++        OutputRedirectSink* standardErrorRedirect() const override;
++#endif
++
+     private:
+         // Reads Bazel env vars and applies them to the config
+         void readBazelEnvVars();
+diff --git a/src/catch2/interfaces/catch_interfaces_config.hpp b/src/catch2/interfaces/catch_interfaces_config.hpp
+index eb054805..ec31c86c 100644
+--- a/src/catch2/interfaces/catch_interfaces_config.hpp
++++ b/src/catch2/interfaces/catch_interfaces_config.hpp
+@@ -10,6 +10,7 @@
+ 
+ #include <catch2/internal/catch_noncopyable.hpp>
+ #include <catch2/internal/catch_stringref.hpp>
++#include <catch2/internal/catch_compiler_capabilities.hpp>
+ 
+ #include <chrono>
+ #include <iosfwd>
+@@ -61,6 +62,7 @@ namespace Catch {
+ 
+     class TestSpec;
+     class IStream;
++    class OutputRedirectSink;
+ 
+     class IConfig : public Detail::NonCopyable {
+     public:
+@@ -94,6 +96,11 @@ namespace Catch {
+         virtual double benchmarkConfidenceInterval() const = 0;
+         virtual unsigned int benchmarkResamples() const = 0;
+         virtual std::chrono::milliseconds benchmarkWarmupTime() const = 0;
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        virtual OutputRedirectSink* standardOutputRedirect() const = 0;
++        virtual OutputRedirectSink* standardErrorRedirect() const = 0;
++#endif
+     };
+ }
+ 
+diff --git a/src/catch2/internal/catch_commandline.cpp b/src/catch2/internal/catch_commandline.cpp
+index 212f1774..c2287d74 100644
+--- a/src/catch2/internal/catch_commandline.cpp
++++ b/src/catch2/internal/catch_commandline.cpp
+@@ -8,6 +8,7 @@
+ #include <catch2/internal/catch_commandline.hpp>
+ 
+ #include <catch2/catch_config.hpp>
++#include <catch2/internal/catch_output_redirect.hpp>
+ #include <catch2/internal/catch_string_manip.hpp>
+ #include <catch2/interfaces/catch_interfaces_config.hpp>
+ #include <catch2/interfaces/catch_interfaces_registry_hub.hpp>
+@@ -305,6 +306,18 @@ namespace Catch {
+             | Opt( config.allowZeroTests )
+                 ["--allow-running-no-tests"]
+                 ( "Treat 'No tests run' as a success" )
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++            | Opt( [&]( std::string const& filename ) {
++                config.standardOutputRedirect = new OutputRedirectSink( stdout, filename );
++            }, "filename" )
++                ["--standard-out-redirect-file"]
++                ( "redirect captured stdout to the given file (for crash recovery)" )
++            | Opt( [&]( std::string const& filename ) {
++                config.standardErrorRedirect = new OutputRedirectSink( stderr, filename );
++            }, "filename" )
++                ["--standard-err-redirect-file"]
++                ( "redirect captured stderr to the given file (for crash recovery)" )
++#endif
+             | Arg( config.testsOrTags, "test name|pattern|tags" )
+                 ( "which test or tests to use" );
+ 
+diff --git a/src/catch2/internal/catch_output_redirect.cpp b/src/catch2/internal/catch_output_redirect.cpp
+index 02f7c982..de384e55 100644
+--- a/src/catch2/internal/catch_output_redirect.cpp
++++ b/src/catch2/internal/catch_output_redirect.cpp
+@@ -61,23 +61,38 @@ namespace Catch {
+ #if defined(CATCH_CONFIG_NEW_CAPTURE)
+ 
+ #if defined(_MSC_VER)
+-    TempFile::TempFile() {
+-        if (tmpnam_s(m_buffer)) {
+-            CATCH_RUNTIME_ERROR("Could not get a temp filename");
++    TempFile::TempFile( std::string filePath ): m_filePath{ filePath } {
++        if ( m_filePath.empty() ) {
++            if ( tmpnam_s( m_buffer ) ) {
++                CATCH_RUNTIME_ERROR( "Could not get a temp filename" );
++            }
++            m_filePath = m_buffer;
++        } else {
++            m_shouldAutomaticallyDelete = false;
+         }
+-        if (fopen_s(&m_file, m_buffer, "w+")) {
++        if ( fopen_s( &m_file, m_filePath.c_str(), "w+" ) ) {
+             char buffer[100];
+-            if (strerror_s(buffer, errno)) {
+-                CATCH_RUNTIME_ERROR("Could not translate errno to a string");
++            if ( strerror_s( buffer, errno ) ) {
++                CATCH_RUNTIME_ERROR( "Could not translate errno to a string" );
+             }
+-            CATCH_RUNTIME_ERROR("Could not open the temp file: '" << m_buffer << "' because: " << buffer);
++            CATCH_RUNTIME_ERROR( "Could not open the temp file: '"
++                                 << m_filePath << "' because: " << buffer );
+         }
+     }
+ #else
+-    TempFile::TempFile() {
+-        m_file = std::tmpfile();
+-        if (!m_file) {
+-            CATCH_RUNTIME_ERROR("Could not create a temp file.");
++    TempFile::TempFile( std::string filePath ): m_filePath{ filePath } {
++        if ( m_filePath.empty() ) {
++            m_file = std::tmpfile();
++            if ( !m_file ) {
++                CATCH_RUNTIME_ERROR( "Could not create a temp file." );
++            }
++        } else {
++            m_shouldAutomaticallyDelete = false;
++            m_file = std::fopen( m_filePath.c_str(), "w+" );
++            if ( !m_file ) {
++                CATCH_RUNTIME_ERROR( "Could not open the temp file: '"
++                                     << m_filePath << "'" );
++            }
+         }
+     }
+ 
+@@ -87,9 +102,27 @@ namespace Catch {
+          // TBD: What to do about errors here?
+          std::fclose(m_file);
+          // We manually create the file on Windows only, on Linux
+-         // it will be autodeleted
++         // it will be autodeleted. Caller-supplied named files are never deleted.
++#if defined(_MSC_VER)
++         if ( m_shouldAutomaticallyDelete ) {
++             std::remove(m_buffer);
++         }
++#endif
++    }
++
++    void TempFile::reopen() {
++        std::fclose( m_file );
+ #if defined(_MSC_VER)
+-         std::remove(m_buffer);
++        if ( fopen_s( &m_file, m_filePath.c_str(), "w+" ) ) {
++            CATCH_RUNTIME_ERROR( "Could not reopen temp file: '"
++                                 << m_filePath << "'" );
++        }
++#else
++        m_file = std::fopen( m_filePath.c_str(), "w+" );
++        if ( !m_file ) {
++            CATCH_RUNTIME_ERROR( "Could not reopen temp file: '"
++                                 << m_filePath << "'" );
++        }
+ #endif
+     }
+ 
+@@ -98,39 +131,83 @@ namespace Catch {
+         return m_file;
+     }
+ 
++    std::string TempFile::getPath() {
++        return m_filePath;
++    }
++
+     std::string TempFile::getContents() {
+-        std::stringstream sstr;
+-        char buffer[100] = {};
+-        std::rewind(m_file);
+-        while (std::fgets(buffer, sizeof(buffer), m_file)) {
+-            sstr << buffer;
++        return getContents( 0 );
++    }
++
++    std::string TempFile::getContents( int startPosition ) {
++        std::string contents;
++        std::fseek( m_file, startPosition, SEEK_SET );
++        char buffer[256];
++        while ( std::fgets( buffer, sizeof( buffer ), m_file ) ) {
++            contents += buffer;
+         }
+-        return sstr.str();
++        return contents;
+     }
+ 
+-    OutputRedirect::OutputRedirect(std::string& stdout_dest, std::string& stderr_dest) :
+-        m_originalStdout(dup(1)),
+-        m_originalStderr(dup(2)),
+-        m_stdoutDest(stdout_dest),
+-        m_stderrDest(stderr_dest) {
+-        dup2(fileno(m_stdoutFile.getFile()), 1);
+-        dup2(fileno(m_stderrFile.getFile()), 2);
++    OutputRedirectSink::OutputRedirectSink( std::FILE* originalSource,
++                                            std::string filePath ):
++        m_tempFile{ filePath } {
++        m_originalSourceDescriptor = fileno( originalSource );
++        m_originalSourceCopyDescriptor = ::dup( m_originalSourceDescriptor );
++        if ( m_originalSourceCopyDescriptor == -1 ) {
++            CATCH_RUNTIME_ERROR(
++                "Could not duplicate descriptor for source file." );
++        }
++        if ( setvbuf( originalSource, NULL, _IONBF, 0 ) ) {
++            CATCH_RUNTIME_ERROR(
++                "Could not turn off buffering for source file." );
++        }
++        if ( ::dup2( fileno( m_tempFile.getFile() ),
++                     m_originalSourceDescriptor ) == -1 ) {
++            CATCH_RUNTIME_ERROR(
++                "Could not redirect source descriptor to temp file." );
++        }
++    }
++
++    OutputRedirectSink::~OutputRedirectSink() {
++        (void)::dup2( m_originalSourceCopyDescriptor,
++                      m_originalSourceDescriptor );
++    }
++
++    void OutputRedirectSink::reset() {
++        (void)::dup2( m_originalSourceCopyDescriptor,
++                      m_originalSourceDescriptor );
++        m_tempFile.reopen();
++        (void)::dup2( fileno( m_tempFile.getFile() ),
++                      m_originalSourceDescriptor );
++        m_lastGetPosition = 0;
+     }
+ 
++    std::string OutputRedirectSink::getContentsFromPosition( int position ) {
++        std::string result = m_tempFile.getContents( position );
++        return result;
++    }
++
++    std::string OutputRedirectSink::getAllContents() {
++        return getContentsFromPosition( 0 );
++    }
++
++    std::string OutputRedirectSink::getLatestContents() {
++        std::string result = getContentsFromPosition( m_lastGetPosition );
++        m_lastGetPosition += (int)result.size();
++        return result;
++    }
++
++    OutputRedirect::OutputRedirect( std::string& stdout_dest,
++                                    std::string& stderr_dest ):
++        m_stdOutRedirect( stdout ),
++        m_stdErrRedirect( stderr ),
++        m_stdoutDest( stdout_dest ),
++        m_stderrDest( stderr_dest ) {}
++
+     OutputRedirect::~OutputRedirect() {
+-        Catch::cout() << std::flush;
+-        fflush(stdout);
+-        // Since we support overriding these streams, we flush cerr
+-        // even though std::cerr is unbuffered
+-        Catch::cerr() << std::flush;
+-        Catch::clog() << std::flush;
+-        fflush(stderr);
+-
+-        dup2(m_originalStdout, 1);
+-        dup2(m_originalStderr, 2);
+-
+-        m_stdoutDest += m_stdoutFile.getContents();
+-        m_stderrDest += m_stderrFile.getContents();
++        m_stdoutDest += m_stdOutRedirect.getAllContents();
++        m_stderrDest += m_stdErrRedirect.getAllContents();
+     }
+ 
+ #endif // CATCH_CONFIG_NEW_CAPTURE
+diff --git a/src/catch2/internal/catch_output_redirect.hpp b/src/catch2/internal/catch_output_redirect.hpp
+index dc89223b..57e40ada 100644
+--- a/src/catch2/internal/catch_output_redirect.hpp
++++ b/src/catch2/internal/catch_output_redirect.hpp
+@@ -77,17 +77,51 @@ namespace Catch {
+         TempFile(TempFile&&) = delete;
+         TempFile& operator=(TempFile&&) = delete;
+ 
+-        TempFile();
++        // If filePath is non-empty, opens that path with "w+" and does not
++        // delete it on destruction (caller owns the file). If empty, behaves
++        // as before: anonymous tmpfile() / tmpnam_s() that is auto-deleted.
++        TempFile( std::string filePath = std::string() );
+         ~TempFile();
+ 
++        void reopen();
++
+         std::FILE* getFile();
++        std::string getPath();
+         std::string getContents();
++        std::string getContents( int startPosition );
+ 
+     private:
+         std::FILE* m_file = nullptr;
++        bool m_shouldAutomaticallyDelete = true;
+     #if defined(_MSC_VER)
+         char m_buffer[L_tmpnam] = { 0 };
+     #endif
++        std::string m_filePath;
++    };
++
++
++    class OutputRedirectSink {
++    public:
++        OutputRedirectSink(OutputRedirectSink const&) = delete;
++        OutputRedirectSink& operator=(OutputRedirectSink const&) = delete;
++        OutputRedirectSink(OutputRedirectSink&&) = delete;
++        OutputRedirectSink& operator=(OutputRedirectSink&&) = delete;
++
++        OutputRedirectSink( std::FILE* originalSource,
++                            std::string filePath = std::string() );
++        ~OutputRedirectSink();
++
++        void reset();
++
++        std::string getContentsFromPosition( int position );
++        std::string getAllContents();
++        std::string getLatestContents();
++
++    private:
++        int m_originalSourceDescriptor = -1;
++        int m_originalSourceCopyDescriptor = -1;
++        TempFile m_tempFile;
++        int m_lastGetPosition = 0;
+     };
+ 
+ 
+@@ -103,10 +137,8 @@ namespace Catch {
+         ~OutputRedirect();
+ 
+     private:
+-        int m_originalStdout = -1;
+-        int m_originalStderr = -1;
+-        TempFile m_stdoutFile;
+-        TempFile m_stderrFile;
++        OutputRedirectSink m_stdOutRedirect;
++        OutputRedirectSink m_stdErrRedirect;
+         std::string& m_stdoutDest;
+         std::string& m_stderrDest;
+     };
+diff --git a/src/catch2/internal/catch_run_context.cpp b/src/catch2/internal/catch_run_context.cpp
+index 07691788..dc708e2e 100644
+--- a/src/catch2/internal/catch_run_context.cpp
++++ b/src/catch2/internal/catch_run_context.cpp
+@@ -515,9 +515,15 @@ namespace Catch {
+                 timer.start();
+                 invokeActiveTestCase();
+ #else
+-                OutputRedirect r(redirectedCout, redirectedCerr);
+-                timer.start();
+-                invokeActiveTestCase();
++                if ( m_config->standardOutputRedirect()
++                     || m_config->standardErrorRedirect() ) {
++                    timer.start();
++                    invokeActiveTestCase();
++                } else {
++                    OutputRedirect r( redirectedCout, redirectedCerr );
++                    timer.start();
++                    invokeActiveTestCase();
++                }
+ #endif
+             } else {
+                 timer.start();
+-- 
+2.53.0.vfs.0.7
+

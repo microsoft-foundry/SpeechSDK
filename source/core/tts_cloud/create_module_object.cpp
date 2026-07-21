@@ -1,0 +1,31 @@
+//
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+//
+// create_module_object.cpp: Implementation definitions for *CreateModuleObject* methods
+//
+
+#include "stdafx.h"
+#include "create_module_object.h"
+#include "create_object_helpers.h"
+#include "factory_helpers.h"
+#include "usp_tts_engine_adapter.h"
+#include "rest_tts_engine_adapter.h"
+
+
+namespace Microsoft {
+namespace CognitiveServices {
+namespace Speech {
+namespace Impl {
+
+
+SPX_EXTERN_C void* TTS_Cloud_CreateModuleObject(const char* className, uint64_t interfaceTypeId)
+{
+    SPX_FACTORY_MAP_BEGIN();
+        SPX_FACTORY_MAP_ENTRY(CSpxRestTtsEngineAdapter, ISpxTtsEngineAdapter);
+        SPX_FACTORY_MAP_ENTRY(CSpxUspTtsEngineAdapter, ISpxTtsEngineAdapter);
+    SPX_FACTORY_MAP_END();
+}
+
+
+} } } } // Microsoft::CognitiveServices::Speech::Impl

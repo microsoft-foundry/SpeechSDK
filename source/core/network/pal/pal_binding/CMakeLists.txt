@@ -1,0 +1,77 @@
+#
+# Copyright (c) Microsoft. All rights reserved.
+# Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+#
+project(pal_binding)
+
+set(SRC_DIR "${PROJECT_SOURCE_DIR}")
+set(INC_DIR "${PROJECT_SOURCE_DIR}/include")
+
+set(HEADERS
+)
+
+set(HEADERS_PRIVATE
+    "${SRC_DIR}/binding_http_event_args.h"
+    "${SRC_DIR}/http_platform_impl.h"
+    "${SRC_DIR}/http_request.h"
+    "${SRC_DIR}/http_response.h"
+    "${SRC_DIR}/stdafx.h"
+    "${SRC_DIR}/web_socket.h"
+)
+
+set(SOURCES
+    "${SRC_DIR}/http_platform_impl.cpp"
+    "${SRC_DIR}/http_request.cpp"
+    "${SRC_DIR}/http_response.cpp"
+    "${SRC_DIR}/web_socket.cpp"
+    "${SRC_DIR}/pal_create_module_object.cpp"
+)
+
+set_source_groups()
+
+add_library(${PROJECT_NAME} STATIC ${HEADERS} ${HEADERS_PRIVATE} ${SOURCES})
+
+target_compile_definitions(${PROJECT_NAME} PUBLIC "NETWORKING_BINDING")
+
+target_include_directories(${PROJECT_NAME}
+    PRIVATE
+        ${CARBON_C_API}
+        ${CARBON_CXX_API}
+        ${CARBON_JSON_PARSER}
+        ${SRC_DIR}
+    PUBLIC
+        ${INC_DIR}
+)
+
+add_security_compile_flags(${PROJECT_NAME})
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    COMPILE_DEFINITIONS "PAL_CONFIG_EXPORTAPIS"
+    FOLDER core/network
+)
+
+#IoS
+list(APPEND IOS_ADDITIONAL_STATIC_LIBS
+    $<TARGET_FILE:${PROJECT_NAME}>
+    # need to add any additional full paths to static libraries
+)
+
+#Finds platforms' native thread library
+set(ADDITIONAL_LIBS)
+if(NOT WIN32)
+  find_package(Threads REQUIRED)
+  list(APPEND ADDITIONAL_LIBS Threads::Threads)
+endif()
+
+target_link_libraries(${PROJECT_NAME}
+    PRIVATE interfaces
+    PRIVATE common
+    PRIVATE networking
+    PUBLIC network_pal
+    PUBLIC ${ADDITIONAL_LIBS}
+)
+
+if(NOT BUILD_CORE_ONLY)
+  message(STATUS "IOS_ADDITIONAL_STATIC_LIBS=${IOS_ADDITIONAL_STATIC_LIBS}")
+endif()
+set(IOS_ADDITIONAL_STATIC_LIBS ${IOS_ADDITIONAL_STATIC_LIBS} PARENT_SCOPE)

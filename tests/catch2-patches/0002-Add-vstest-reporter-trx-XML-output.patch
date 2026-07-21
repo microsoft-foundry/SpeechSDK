@@ -1,0 +1,1250 @@
+[Catch2 PATCH] Add vstest reporter (.trx XML output)
+
+Add a new bundled reporter that emits Visual Studio Test (.trx) format,
+suitable for ingestion by Azure DevOps Pipelines and similar test-result
+consumers that prefer the VS Test schema.
+
+The reporter is built on the v3 streaming reporter model:
+StreamingReporterBase + native testCasePartialStarting/Ended callbacks
+provide per-traversal granularity. Per-traversal stdout/stderr content
+is sliced from the process-wide OutputRedirectSinks (see the framework
+redirect machinery) via position-based getLatestContents() reads at each
+section traversal's completion. The .trx XML is emitted incrementally
+between test-case traversals when output is to a file (reopen-and-
+truncate between emissions for crash recovery), or once at testRunEnded
+when output is to stdout/console.
+
+The reporter takes ownership of the framework's process-wide sinks at
+construction time via IncrementalSectionTraversal::setRedirectSinksFromConfig.
+Sink ownership is transferred from one traversal to the next via
+setRedirectSinksFromPredecessor as test traversals complete.
+testCaseEnded captures any residual TestCaseStats stdout/stderr (the
+sum delivered when no process-wide sinks are active and the per-test
+OutputRedirect was used instead).
+
+Custom options are read from the reporter spec's customOptions map:
+  Xsource-path-prefix       common path prefix to strip from source
+                            file references in error messages
+  Xreport-attachment-paths  semicolon-delimited paths to attach to
+                            <ResultSummary>/<ResultFiles>
+
+Files added:
+  src/catch2/reporters/catch_reporter_vstest.hpp
+  src/catch2/reporters/catch_reporter_vstest.cpp
+
+Files modified for registration and build:
+  src/catch2/internal/catch_reporter_registry.cpp
+  src/CMakeLists.txt
+---
+ src/CMakeLists.txt                            |   2 +
+ .../internal/catch_reporter_registry.cpp      |   3 +
+ .../reporters/catch_reporter_vstest.cpp       | 894 ++++++++++++++++++
+ .../reporters/catch_reporter_vstest.hpp       | 254 +++++
+ 4 files changed, 1153 insertions(+)
+ create mode 100644 src/catch2/reporters/catch_reporter_vstest.cpp
+ create mode 100644 src/catch2/reporters/catch_reporter_vstest.hpp
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 28cd4e25..cac25134 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -303,6 +303,7 @@ set(REPORTER_HEADERS
+   ${SOURCES_DIR}/reporters/catch_reporter_streaming_base.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_tap.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_teamcity.hpp
++  ${SOURCES_DIR}/reporters/catch_reporter_vstest.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_xml.hpp
+   ${SOURCES_DIR}/reporters/catch_reporters_all.hpp
+ )
+@@ -322,6 +323,7 @@ set(REPORTER_SOURCES
+   ${SOURCES_DIR}/reporters/catch_reporter_streaming_base.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_tap.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_teamcity.cpp
++  ${SOURCES_DIR}/reporters/catch_reporter_vstest.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_xml.cpp
+ )
+ set(REPORTER_FILES ${REPORTER_HEADERS} ${REPORTER_SOURCES})
+diff --git a/src/catch2/internal/catch_reporter_registry.cpp b/src/catch2/internal/catch_reporter_registry.cpp
+index cea8c4dc..e569f31a 100644
+--- a/src/catch2/internal/catch_reporter_registry.cpp
++++ b/src/catch2/internal/catch_reporter_registry.cpp
+@@ -19,6 +19,7 @@
+ #include <catch2/reporters/catch_reporter_sonarqube.hpp>
+ #include <catch2/reporters/catch_reporter_tap.hpp>
+ #include <catch2/reporters/catch_reporter_teamcity.hpp>
++#include <catch2/reporters/catch_reporter_vstest.hpp>
+ #include <catch2/reporters/catch_reporter_xml.hpp>
+ 
+ namespace Catch {
+@@ -46,6 +47,8 @@ namespace Catch {
+             Detail::make_unique<ReporterFactory<TAPReporter>>();
+         m_impl->factories["TeamCity"] =
+             Detail::make_unique<ReporterFactory<TeamCityReporter>>();
++        m_impl->factories["vstest"] =
++            Detail::make_unique<ReporterFactory<VstestReporter>>();
+         m_impl->factories["XML"] =
+             Detail::make_unique<ReporterFactory<XmlReporter>>();
+         m_impl->factories["JSON"] =
+diff --git a/src/catch2/reporters/catch_reporter_vstest.cpp b/src/catch2/reporters/catch_reporter_vstest.cpp
+new file mode 100644
+index 00000000..4b001fd8
+--- /dev/null
++++ b/src/catch2/reporters/catch_reporter_vstest.cpp
+@@ -0,0 +1,894 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE_1_0.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#include <catch2/reporters/catch_reporter_vstest.hpp>
++
++#include <catch2/catch_test_spec.hpp>
++#include <catch2/catch_tostring.hpp>
++#include <catch2/catch_config.hpp>
++#include <catch2/interfaces/catch_interfaces_config.hpp>
++#include <catch2/internal/catch_enforce.hpp>
++#include <catch2/internal/catch_istream.hpp>
++#include <catch2/internal/catch_list.hpp>
++#include <catch2/internal/catch_string_manip.hpp>
++#include <catch2/reporters/catch_reporter_helpers.hpp>
++
++#include <algorithm>
++#include <cassert>
++#include <chrono>
++#include <ctime>
++#include <iomanip>
++#include <random>
++#include <sstream>
++
++namespace Catch {
++
++    namespace { // anonymous namespace/this file only
++
++        // Several elements in Vstest require globally unique IDs (GUIDs). Here
++        // we use a random generation algorithm that's *not* guaranteed to be
++        // truly globally unique, but should be "unique enough" for all
++        // reasonable purposes that aren't correlating hundreds of thousands of
++        // test runs.
++        std::string get_random_not_guaranteed_unique_guid() {
++            auto get_random_uint = []() {
++                std::random_device random_device;
++                std::mt19937 random_generator( random_device() );
++                std::uniform_int_distribution<unsigned int> random_distribution(
++                    std::numeric_limits<unsigned int>::min(),
++                    std::numeric_limits<unsigned int>::max() );
++                return random_distribution( random_generator );
++            };
++
++            std::ostringstream guid_stream;
++
++            bool is_first_segment{ true };
++            for ( const auto segmentLength : { 8, 4, 4, 4, 12 } ) {
++                guid_stream << ( is_first_segment ? "" : "-" );
++                is_first_segment = false;
++
++                for ( int i = 0; i < segmentLength; i++ ) {
++                    guid_stream << std::hex << ( get_random_uint() % 16 );
++                }
++            }
++
++            return guid_stream.str();
++        }
++
++        std::string
++        toDurationString( std::chrono::system_clock::duration duration ) {
++            auto totalNanos =
++                std::chrono::duration_cast<std::chrono::nanoseconds>( duration )
++                    .count();
++            auto totalHns = totalNanos / 100;
++            auto totalSeconds = totalNanos / 1000000000;
++            auto totalMinutes = totalSeconds / 60;
++            auto totalHours = totalMinutes / 60;
++            ReusableStringStream resultStream;
++            resultStream << std::setfill( '0' ) << std::setw( 2 )
++                         << totalHours % 60 << ":" << std::setfill( '0' )
++                         << std::setw( 2 ) << totalMinutes % 60 << ":"
++                         << std::setfill( '0' ) << std::setw( 2 )
++                         << totalSeconds % 60 << "." << std::setfill( '0' )
++                         << std::setw( -7 ) << totalHns % 10000000;
++            return resultStream.str();
++        }
++
++        // Some consumers of output .trx files (e.g. Azure DevOps Pipelines)
++        // fail to ingest results from .trx files if they have certain
++        // characters in them. This removes those characters. To-do: make this a
++        // parameter or address the root problem of consumers being weird
++        std::string getSanitizedTrxName( const std::string& rawName ) {
++            ReusableStringStream resultStream;
++            auto lastChar = '\0';
++            for ( size_t i = 0; i < rawName.length(); ) {
++                if ( rawName[i] == '[' ) {
++                    if ( rawName.find( ']', i ) == std::string::npos ) {
++                        CATCH_ERROR( "Unclosed [tag] in name: " << rawName );
++                    }
++                    do {
++                        i++;
++                    } while ( rawName[i - 1] != ']' );
++                    if ( lastChar == ' ' && rawName[i] == ' ' ) {
++                        // "removed [tag] here" -> "removed  tag" -> "removed
++                        // tag"
++                        i++;
++                    }
++                } else if ( rawName[i] == ',' ) {
++                    i++;
++                } else {
++                    lastChar = rawName[i];
++                    resultStream << lastChar;
++                    i++;
++                }
++            }
++            return trim( resultStream.str() );
++        }
++
++    } // namespace
++
++    // ----------------------------------------------------------------------
++    // IncrementalSectionTraversal
++    // ----------------------------------------------------------------------
++
++    IncrementalSectionTraversal::IncrementalSectionTraversal():
++        testRunInfo{ "" },
++        startTime{ std::chrono::system_clock::now() },
++        finishTime{ std::chrono::system_clock::now() } {}
++
++    std::ostringstream& IncrementalSectionTraversal::getFlushedStdOut() {
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        if ( m_stdOutSourceSink ) {
++            m_stdOutStream << m_stdOutSourceSink->getLatestContents();
++        }
++#endif
++        return m_stdOutStream;
++    }
++
++    std::ostringstream& IncrementalSectionTraversal::getFlushedStdErr() {
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        if ( m_stdErrSourceSink ) {
++            m_stdErrStream << m_stdErrSourceSink->getLatestContents();
++        }
++#endif
++        return m_stdErrStream;
++    }
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++    void IncrementalSectionTraversal::setRedirectSinksFromConfig(
++        const Catch::IConfig* config ) {
++        m_stdOutSourceSink.reset( config->standardOutputRedirect() );
++        m_stdErrSourceSink.reset( config->standardErrorRedirect() );
++    }
++
++    void IncrementalSectionTraversal::setRedirectSinksFromPredecessor(
++        IncrementalSectionTraversal& predecessor ) {
++        m_stdOutSourceSink.reset( predecessor.m_stdOutSourceSink.release() );
++        m_stdErrSourceSink.reset( predecessor.m_stdErrSourceSink.release() );
++    }
++#endif
++
++    // Record an assertion associated with this traversal.
++    //
++    // If we've already recorded a fatal signal, *do not* use the backing
++    // collections, as memory can't be trusted for push_back in a terminal
++    // state. Instead, just record the file/line info for future (non-heap)
++    // serialization.
++    //
++    // Delayed expansion of an expression doesn't work (i.e. you can't hold on
++    // to an AssertionStats& forever and then expect to have the backing data
++    // available) so we record the expansion in tandem with the other info.
++    void IncrementalSectionTraversal::addAssertion(
++        const Catch::AssertionStats& assertion ) {
++        if ( !fatalSignalName.empty() ) {
++            auto lineInfo = assertion.assertionResult.getSourceInfo();
++            fatalSignalSourceInfo = { lineInfo.file, lineInfo.line };
++        } else {
++            auto expanded = assertion.assertionResult.getExpandedExpression();
++            allAssertionsWithExpansions.push_back( { assertion, expanded } );
++            auto& outStream = getFlushedStdOut();
++            for ( const auto& info : assertion.infoMessages ) {
++                outStream << "INFO: " << info.message << '\n';
++            }
++        }
++    }
++
++    // As a full-depth traversal of section hierarchy proceeds, it
++    // accumulates SectionInfo "on the way down" and SectionStats "on the
++    // way back up." Once the number of complementary SectionStats is
++    // equivalent to the number of SectionInfo we've processed, the
++    // full-depth traversal is complete.
++    bool IncrementalSectionTraversal::isComplete() const {
++        return !allSectionInfo.empty() &&
++               allSectionInfo.size() == allSectionStats.size();
++    }
++
++    bool IncrementalSectionTraversal::isOk() const {
++        return isComplete() && fatalSignalName.empty() &&
++               std::all_of( allAssertionsWithExpansions.begin(),
++                            allAssertionsWithExpansions.end(),
++                            []( const std::pair<Catch::AssertionStats,
++                                                std::string>& entry ) {
++                                return entry.first.assertionResult.isOk();
++                            } );
++    }
++
++    // ----------------------------------------------------------------------
++    // VstestResult
++    // ----------------------------------------------------------------------
++
++    VstestResult::VstestResult():
++        testId{ get_random_not_guaranteed_unique_guid() },
++        testExecutionId{ get_random_not_guaranteed_unique_guid() } {}
++
++    std::vector<VstestResult> VstestResult::parseTraversals(
++        const std::vector<SectionTraversalRef>& traversals ) {
++        std::vector<VstestResult> results;
++        auto isNewTraversalRoot =
++            [&]( const VstestResult& result,
++                 IncrementalSectionTraversal& traversal ) -> bool {
++            auto lastTraversalPtr =
++                result.traversals.empty()
++                    ? nullptr
++                    : &( result.traversals[result.traversals.size() - 1] );
++            return !lastTraversalPtr ||
++                   lastTraversalPtr->get().allSectionInfo.empty() ||
++                   traversal.allSectionInfo.empty() ||
++                   lastTraversalPtr->get().allSectionInfo[0].name !=
++                       traversal.allSectionInfo[0].name;
++        };
++        for ( size_t i = 0; i < traversals.size(); ) {
++            VstestResult newResult{};
++            do {
++                newResult.traversals.push_back( traversals[i] );
++                i++;
++            } while ( i < traversals.size() &&
++                      !isNewTraversalRoot( newResult, traversals[i] ) );
++            results.push_back( newResult );
++        }
++        return results;
++    }
++
++    bool VstestResult::isOk() const {
++        return std::all_of( traversals.begin(),
++                            traversals.end(),
++                            []( IncrementalSectionTraversal& traversal ) {
++                                return traversal.isOk();
++                            } );
++    }
++
++    std::string VstestResult::getRootTestName() const {
++        return traversals.empty() || traversals[0].get().allSectionInfo.empty()
++                   ? ""
++                   : traversals[0].get().allSectionInfo[0].name;
++    }
++
++    std::string VstestResult::getRootRunName() const {
++        return traversals.empty() ? std::string() : static_cast<std::string>( traversals[0].get().testRunInfo.name );
++    }
++
++    const std::vector<Catch::Tag> VstestResult::getRootTestTags() const {
++        return traversals.empty() ? std::vector<Catch::Tag>{}
++                                  : traversals[0].get().testTags;
++    }
++
++    std::chrono::system_clock::time_point VstestResult::getStartTime() const {
++        return traversals.empty() || !traversals[0].get().isComplete()
++                   ? std::chrono::system_clock::now()
++                   : traversals[0].get().startTime;
++    }
++
++    std::chrono::system_clock::time_point VstestResult::getFinishTime() const {
++        return traversals.empty() ||
++                       !traversals[traversals.size() - 1].get().isComplete()
++                   ? std::chrono::system_clock::now()
++                   : traversals[traversals.size() - 1].get().finishTime;
++    }
++
++    // ----------------------------------------------------------------------
++    // VstestTrxDocument
++    // ----------------------------------------------------------------------
++
++    VstestTrxDocument::VstestTrxDocument(
++        std::ostream& stream,
++        std::vector<VstestResult>& results,
++        const std::string& sourcePathPrefix,
++        const std::vector<std::string>& attachmentPaths,
++        bool usePerTraversalOutputRedirection ):
++        m_xml{ stream },
++        m_usePerTraversalOutputRedirection{ usePerTraversalOutputRedirection },
++        m_results{ std::move( results ) },
++        m_sourcePrefix{ getNormalizedPath( sourcePathPrefix ) },
++        m_attachmentPaths{ attachmentPaths },
++        m_defaultTestListId{ get_random_not_guaranteed_unique_guid() } {}
++
++    void VstestTrxDocument::serialize(
++        std::ostream& stream,
++        std::vector<VstestResult>& results,
++        const std::string& sourcePathPrefix,
++        const std::vector<std::string>& attachmentPaths,
++        bool usePerTraversalOutputRedirection ) {
++        CATCH_ENFORCE( !results.empty(),
++                       "VstestTrxDocument serialization shouldn't be performed "
++                       "on an empty results collection" );
++        for ( const auto& result : results ) {
++            CATCH_ENFORCE(
++                !result.traversals.empty(),
++                "VstestTrxDocument serialization never expects a result "
++                "with no traversals" );
++        }
++        VstestTrxDocument trx{ stream,
++                               results,
++                               sourcePathPrefix,
++                               attachmentPaths,
++                               usePerTraversalOutputRedirection };
++        trx.startWriteTestRun();
++        trx.writeTimes();
++        trx.writeResults();
++        trx.writeTestDefinitions();
++        trx.writeTestLists();
++        trx.writeTestEntries();
++        trx.writeSummary( attachmentPaths );
++        trx.m_xml.endElement(); // TestRun
++    }
++
++    void VstestTrxDocument::startWriteTestRun() {
++        auto runName = m_results[0].traversals[0].get().testRunInfo.name;
++        m_xml.startElement( "TestRun" );
++        m_xml.writeAttribute( "id", get_random_not_guaranteed_unique_guid() );
++        m_xml.writeAttribute( "name", runName );
++        m_xml.writeAttribute( "runUser", "Catch2VstestReporter" );
++        m_xml.writeAttribute(
++            "xmlns",
++            "http://microsoft.com/schemas/VisualStudio/TeamTest/2010" );
++    }
++
++    void VstestTrxDocument::writeTimes() {
++        auto startTime = m_results[0].getStartTime();
++        auto finishTime = m_results[m_results.size() - 1].getFinishTime();
++
++        m_xml.scopedElement( "Times" )
++            .writeAttribute( "creation", Catch::Detail::stringify( startTime ) )
++            .writeAttribute( "queuing", Catch::Detail::stringify( startTime ) )
++            .writeAttribute( "start", Catch::Detail::stringify( startTime ) )
++            .writeAttribute( "finish", Catch::Detail::stringify( finishTime ) );
++    }
++
++    void VstestTrxDocument::writeResults() {
++        m_xml.startElement( "Results" );
++        for ( auto& result : m_results ) {
++            if ( !result.traversals.empty() ) {
++                writeTopLevelResult( result );
++            }
++        }
++        m_xml.endElement(); // Results
++    }
++
++    void VstestTrxDocument::writeTopLevelResult( const VstestResult& result ) {
++        startWriteTestResult( result );
++        writeTimestampAttributes( result.getStartTime(),
++                                  result.getFinishTime() );
++        m_xml.writeAttribute( "outcome", result.isOk() ? "Passed" : "Failed" );
++
++        if ( result.traversals.size() == 1 ) {
++            writeTraversalOutput( result.traversals[0],
++                                  EmitOutput::Everything );
++        } else {
++            m_xml.writeAttribute( "resultType", "DataDrivenTest" );
++            m_xml.startElement( "InnerResults" );
++            for ( const auto& traversal : result.traversals ) {
++                writeInnerResult( result, traversal );
++            }
++            m_xml.endElement(); // InnerResults
++        }
++
++        if ( !m_usePerTraversalOutputRedirection ) {
++            // If we don't have support for per-section output redirection,
++            // redirection can only happen on the top-level result
++            // (per-test-case). We should emit there to still have the
++            // redirected output without duplicating it more than we already
++            // will.
++            writeTraversalOutput(
++                result.traversals[result.traversals.size() - 1],
++                EmitOutput::StdOut | EmitOutput::StdErr );
++        }
++
++        m_xml.endElement(); // UnitTestResult
++    }
++
++    void VstestTrxDocument::writeTimestampAttributes(
++        std::chrono::system_clock::time_point start,
++        std::chrono::system_clock::time_point finish ) {
++        m_xml.writeAttribute( "startTime", Catch::Detail::stringify( start ) );
++        m_xml.writeAttribute( "endTime", Catch::Detail::stringify( finish ) );
++        m_xml.writeAttribute( "duration", toDurationString( finish - start ) );
++    }
++
++    void VstestTrxDocument::startWriteTestResult( const VstestResult& result ) {
++        startWriteTestResult(
++            result.testId,
++            result.testExecutionId,
++            result.traversals[0].get().allSectionInfo[0].name );
++    }
++
++    void
++    VstestTrxDocument::startWriteTestResult( const std::string& testId,
++                                             const std::string& testExecutionId,
++                                             const std::string& testName ) {
++        constexpr auto computerName = "localhost";
++        constexpr auto vsTestTypeId = "13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b";
++
++        m_xml.startElement( "UnitTestResult" );
++        m_xml.writeAttribute( "executionId", testExecutionId );
++        m_xml.writeAttribute( "testId", testId );
++        m_xml.writeAttribute( "testName", testName );
++        m_xml.writeAttribute( "computerName", computerName );
++        m_xml.writeAttribute( "testType", vsTestTypeId );
++        m_xml.writeAttribute( "testListId", m_defaultTestListId );
++    }
++
++    void VstestTrxDocument::writeTraversalOutput(
++        IncrementalSectionTraversal& traversal, EmitOutput outputOptions ) {
++        auto hasOpt = [=]( EmitOutput option ) {
++            return ( outputOptions & option ) == option;
++        };
++        std::string message{ hasOpt( EmitOutput::Message )
++                                 ? getErrorMessageForTraversal( traversal )
++                                 : "" };
++        std::string stackTrace{ hasOpt( EmitOutput::Stack )
++                                    ? getStackMessageForTraversal( traversal )
++                                    : "" };
++        std::string stdOut{ hasOpt( EmitOutput::StdOut )
++                                ? traversal.getFlushedStdOut().str()
++                                : "" };
++        std::string stdErr{ hasOpt( EmitOutput::StdErr )
++                                ? traversal.getFlushedStdErr().str()
++                                : "" };
++
++        // It's a bit tedious, but the XML structure is:
++        //
++        //   <Output>
++        //     <StdOut> redirected stdout goes here </StdOut>
++        //     <StdErr> redirected stderr goes here </StdErr>
++        //     <ErrorInfo>
++        //       <Message> test failed with REQUIRE( foo == bar )... </Message>
++        //       <StackTrace> at path/to/file.cpp: line 42 </StackTrace>
++        //     </ErrorInfo>
++        //   </Output>
++        //
++        // We serialize the needed structure if requested and present,
++        // additionally providing empty <StdOut/> and <StdErr/> elements if
++        // the traversal terminated unexpectedly (to facilitate postprocess
++        // injection of file-based redirection--Catch can't do that for you,
++        // but it can make it easier)
++        if ( !traversal.isComplete() || !message.empty() ||
++             !stackTrace.empty() || !stdOut.empty() || !stdErr.empty() ) {
++            auto outputElement = m_xml.scopedElement( "Output" );
++
++            auto writeIfPresentOr = [&]( const char* elementName,
++                                         const std::string& value,
++                                         bool doAlways = false ) {
++                if ( doAlways || !value.empty() ) {
++                    m_xml.scopedElement( elementName )
++                        .writeText( value, XmlFormatting::Newline );
++                }
++            };
++            writeIfPresentOr( "StdOut", stdOut, !traversal.isComplete() );
++            writeIfPresentOr( "StdErr", stdErr, !traversal.isComplete() );
++            if ( !message.empty() || !stackTrace.empty() ) {
++                auto errorInfoElement = m_xml.scopedElement( "ErrorInfo" );
++                writeIfPresentOr( "Message", message );
++                writeIfPresentOr( "StackTrace", stackTrace );
++            }
++        }
++    }
++
++    void VstestTrxDocument::writeInnerResult(
++        const VstestResult& result, IncrementalSectionTraversal& traversal ) {
++        startWriteTestResult( get_random_not_guaranteed_unique_guid(),
++                              get_random_not_guaranteed_unique_guid(),
++                              getFullTestNameForTraversal( traversal ) );
++        m_xml.writeAttribute( "parentExecutionId", result.testExecutionId );
++        m_xml.writeAttribute( "resultType", "DataDrivenDataRow" );
++        writeTimestampAttributes( traversal.startTime, traversal.finishTime );
++        m_xml.writeAttribute( "outcome",
++                              traversal.isOk() ? "Passed" : "Failed" );
++
++        // If we're able to redirect capture on a per-section basis, we should
++        // print everything about the traversal in the appropriate place. If we
++        // can't, then the redirected output can only go on the top-level result
++        // and we should skip emitting it here
++        writeTraversalOutput( traversal,
++                              m_usePerTraversalOutputRedirection
++                                  ? EmitOutput::Everything
++                                  : EmitOutput::Message | EmitOutput::Stack );
++
++        m_xml.endElement(); // UnitTestResult
++    }
++
++    void VstestTrxDocument::writeTestDefinitions() {
++        auto testDefinitionsElement = m_xml.scopedElement( "TestDefinitions" );
++        for ( const auto& result : m_results ) {
++            auto unitTestElement = m_xml.scopedElement( "UnitTest" );
++            m_xml.writeAttribute( "name", result.getRootTestName() );
++            m_xml.writeAttribute( "storage", result.getRootRunName() );
++            m_xml.writeAttribute( "id", result.testId );
++
++            auto testTags = result.traversals[0].get().testTags;
++            if ( !result.traversals[0].get().testTags.empty() ) {
++                auto testCategoriesElement =
++                    m_xml.scopedElement( "TestCategory" );
++                for ( const auto& tag : result.traversals[0].get().testTags ) {
++                    m_xml.scopedElement( "TestCategoryItem" )
++                        .writeAttribute( "TestCategory", tag.original );
++                }
++            }
++            m_xml.scopedElement( "Execution" )
++                .writeAttribute( "id", result.testExecutionId );
++            m_xml.scopedElement( "TestMethod" )
++                .writeAttribute( "codeBase", result.getRootRunName() )
++                .writeAttribute( "adapterTypeName",
++                                 "executor://mstestadapter/v2" )
++                .writeAttribute( "className", "Catch2.Test" )
++                .writeAttribute( "name", result.getRootTestName() );
++        }
++    }
++
++    void VstestTrxDocument::writeTestEntries() {
++        auto testEntriesElement = m_xml.scopedElement( "TestEntries" );
++        for ( const auto& result : m_results ) {
++            m_xml.scopedElement( "TestEntry" )
++                .writeAttribute( "testId", result.testId )
++                .writeAttribute( "executionId", result.testExecutionId )
++                .writeAttribute( "testListId", m_defaultTestListId );
++        }
++    }
++
++    void VstestTrxDocument::writeTestLists() {
++        auto testListsElement = m_xml.scopedElement( "TestLists" );
++        m_xml.scopedElement( "TestList" )
++            .writeAttribute( "name", "Default test list for Catch2" )
++            .writeAttribute( "id", m_defaultTestListId );
++    }
++
++    void VstestTrxDocument::writeSummary(
++        const std::vector<std::string>& attachmentPaths ) {
++        auto resultSummaryElement = m_xml.scopedElement( "ResultSummary" );
++
++        auto runHasFailures = std::any_of(
++            m_results.begin(),
++            m_results.end(),
++            []( const VstestResult& result ) { return !result.isOk(); } );
++        resultSummaryElement.writeAttribute(
++            "outcome", runHasFailures ? "Failed" : "Passed" );
++
++        if ( !attachmentPaths.empty() ) {
++            auto resultFilesElement = m_xml.scopedElement( "ResultFiles" );
++            for ( const auto& attachmentPath : attachmentPaths ) {
++                m_xml.scopedElement( "ResultFile" )
++                    .writeAttribute( "path", attachmentPath );
++            }
++        }
++    }
++
++    std::string VstestTrxDocument::getNormalizedPath(
++        const std::string& unnormalizedPrefix ) {
++        std::string result{ unnormalizedPrefix };
++        std::transform( unnormalizedPrefix.begin(),
++                        unnormalizedPrefix.end(),
++                        result.begin(),
++                        []( unsigned char c ) {
++                            return c == '\\' ? '/' : std::tolower( c );
++                        } );
++        return result;
++    }
++
++    std::string VstestTrxDocument::getErrorMessageForTraversal(
++        IncrementalSectionTraversal& traversal ) {
++        std::ostringstream errorStream;
++        if ( !traversal.isComplete() ) {
++            errorStream << "Test execution terminated unexpectedly before this "
++                           "test completed. Please see redirected output,"
++                        << " if available, for more details."
++                        << "\n";
++        }
++        for ( const auto& assertionWithExpansion :
++              traversal.allAssertionsWithExpansions ) {
++            const auto& result = assertionWithExpansion.first.assertionResult;
++            if ( result.getResultType() == ResultWas::ExpressionFailed ) {
++                // Here we'll write the failure and also its expanded form,
++                // e.g.:
++                //  REQUIRE( x == 1 ) as REQUIRE( 2 == 1 )
++                errorStream << result.getExpressionInMacro();
++
++                if ( result.getExpression() != assertionWithExpansion.second ) {
++                    errorStream << " as " << result.getTestMacroName() << " ( "
++                                << assertionWithExpansion.second << " ) "
++                                << '\n';
++                }
++            } else if ( result.getResultType() == ResultWas::ThrewException ) {
++                errorStream << "Exception: " << result.getMessage() << '\n';
++            } else if ( !result.isOk() ) {
++                errorStream << "Failed: " << result.getMessage() << '\n';
++            }
++        }
++        if ( !traversal.fatalSignalName.empty() ) {
++            auto& source = traversal.fatalSignalSourceInfo;
++            errorStream << "Fatal error: " << traversal.fatalSignalName
++                        << " at ";
++            serializeSourceInfo( errorStream, source.first, source.second );
++        }
++
++        return errorStream.str();
++    }
++
++    std::string VstestTrxDocument::getStackMessageForTraversal(
++        IncrementalSectionTraversal& traversal ) {
++        std::ostringstream stackStream;
++        for ( const auto& assertionWithExpansion :
++              traversal.allAssertionsWithExpansions ) {
++            const auto info =
++                assertionWithExpansion.first.assertionResult.getSourceInfo();
++            serializeSourceInfo( stackStream, std::string( info.file ), info.line );
++        }
++        if ( !traversal.isComplete() && !traversal.allSectionInfo.empty() ) {
++            const auto& lastSection =
++                traversal.allSectionInfo[traversal.allSectionInfo.size() - 1];
++            serializeSourceInfo( stackStream,
++                                 std::string( lastSection.lineInfo.file ),
++                                 lastSection.lineInfo.line );
++        }
++        return stackStream.str();
++    }
++
++    std::string VstestTrxDocument::getFullTestNameForTraversal(
++        IncrementalSectionTraversal& traversal ) {
++        std::ostringstream nameStream;
++        for ( size_t i = 0; i < traversal.allSectionInfo.size(); i++ ) {
++            nameStream << ( i > 0 ? " / " : "" )
++                       << getSanitizedTrxName(
++                              traversal.allSectionInfo[i].name );
++        }
++        return nameStream.str();
++    }
++
++    void VstestTrxDocument::serializeSourceInfo( std::ostringstream& stream,
++                                                 const std::string& file,
++                                                 const size_t line ) {
++        std::string normalizedFile{ getNormalizedPath( file ) };
++        auto pos = normalizedFile.rfind( m_sourcePrefix ) == 0
++                       ? m_sourcePrefix.length()
++                       : 0;
++        stream << "at Catch.Module.Method() in " << file.substr( pos )
++               << ":line " << line << '\n';
++    }
++
++    VstestTrxDocument::EmitOutput
++    operator|( VstestTrxDocument::EmitOutput lhs,
++               VstestTrxDocument::EmitOutput rhs ) {
++        return static_cast<VstestTrxDocument::EmitOutput>(
++            static_cast<std::underlying_type_t<VstestTrxDocument::EmitOutput>>(
++                lhs ) |
++            static_cast<std::underlying_type_t<VstestTrxDocument::EmitOutput>>(
++                rhs ) );
++    }
++
++    VstestTrxDocument::EmitOutput
++    operator&( VstestTrxDocument::EmitOutput lhs,
++               VstestTrxDocument::EmitOutput rhs ) {
++        return static_cast<VstestTrxDocument::EmitOutput>(
++            static_cast<std::underlying_type_t<VstestTrxDocument::EmitOutput>>(
++                lhs ) &
++            static_cast<std::underlying_type_t<VstestTrxDocument::EmitOutput>>(
++                rhs ) );
++    }
++
++    // ----------------------------------------------------------------------
++    // VstestReporter
++    // ----------------------------------------------------------------------
++
++    namespace {
++        // Split a separator-delimited string into its constituent parts.
++        // Used to parse the semicolon-delimited Xreport-attachment-paths
++        // custom option.
++        std::vector<std::string> splitOn( const std::string& input,
++                                          char separator ) {
++            std::vector<std::string> result;
++            size_t start = 0;
++            for ( size_t i = 0; i <= input.size(); ++i ) {
++                if ( i == input.size() || input[i] == separator ) {
++                    if ( i > start ) {
++                        result.push_back( input.substr( start, i - start ) );
++                    }
++                    start = i + 1;
++                }
++            }
++            return result;
++        }
++    } // namespace
++
++    VstestReporter::VstestReporter( ReporterConfig&& _config ):
++        StreamingReporterBase( CATCH_MOVE( _config ) ),
++        m_outputStreamRef{ m_stream },
++        m_currentTestRunInfo{ "" } {
++        m_preferences.shouldRedirectStdOut = true;
++        m_preferences.shouldReportAllAssertions = true;
++
++        // Parse custom options. Per the v3.0.1 reporter-spec convention,
++        // every reporter-specific option key must start with 'X' (the
++        // reporter-spec parser rejects unrecognized non-X keys). The 'X'
++        // prefix is preserved in the customOptions map.
++        auto const& opts = m_customOptions;
++        auto it = opts.find( "Xsource-path-prefix" );
++        if ( it != opts.end() ) {
++            m_sourcePathPrefix = it->second;
++        }
++        it = opts.find( "Xreport-attachment-paths" );
++        if ( it != opts.end() ) {
++            m_reportAttachmentPaths = splitOn( it->second, ';' );
++        }
++
++        // Resolve our output filename by matching this reporter's
++        // customOptions against the processed reporter specs in the config.
++        // We need the filename so resetIncrementalOutput() can reopen-and-
++        // truncate between incremental emissions: each emission starts from
++        // a clean file rather than overwriting in place, which would leave
++        // stale trailing bytes if a later emission is shorter than an
++        // earlier one (e.g. final emission of a passing test omits the
++        // placeholder <Output> element that mid-test emissions include).
++        //
++        // getProcessedReporterSpecs() lives on the concrete Config class, not
++        // on IConfig, so we downcast. This is safe because the only IConfig
++        // implementation in v3.0.1 is Config.
++        if ( auto const* concreteConfig = dynamic_cast<Config const*>( m_config ) ) {
++            for ( auto const& spec : concreteConfig->getProcessedReporterSpecs() ) {
++                if ( spec.name == "vstest" && spec.customOptions == m_customOptions ) {
++                    m_outputFilename = spec.outputFilename;
++                    break;
++                }
++            }
++        }
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        m_currentTraversal.setRedirectSinksFromConfig( m_config );
++#endif
++
++        // Opt out of upstream's std::unitbuf on file streams (added in v3.1.1).
++        // Per-write flushing slows down the reporter's high-volume XML emission
++        // significantly (multiple-times slowdown observed in Debug builds with
++        // verbose stderr output) without benefiting our crash-recovery story -
++        // we already provide crash recovery via the incremental rewrite
++        // mechanism in resetIncrementalOutput()/emitNewTrx() (full document
++        // re-emitted to disk at every sectionStarting and testCasePartialEnded).
++        m_stream << std::nounitbuf;
++    }
++
++    std::string VstestReporter::getDescription() {
++        return "Reports test results in .trx XML format, conformant to Vstest "
++               "v2";
++    }
++
++    void VstestReporter::testRunStarting( const TestRunInfo& testRunInfo ) {
++        m_currentTestRunInfo = testRunInfo;
++    }
++
++    void VstestReporter::testCaseStarting( const TestCaseInfo& testCaseInfo ) {
++        m_currentTestTags = testCaseInfo.tags;
++    }
++
++    void VstestReporter::testCasePartialStarting(
++        const TestCaseInfo& /*testCaseInfo*/, uint64_t /*partNumber*/ ) {
++        // A new section traversal is beginning. Record per-traversal
++        // metadata; section info will be appended as sections are entered.
++        m_currentTraversal.startTime = std::chrono::system_clock::now();
++        m_currentTraversal.testRunInfo = m_currentTestRunInfo;
++        m_currentTraversal.testTags = m_currentTestTags;
++    }
++
++    void VstestReporter::sectionStarting( const SectionInfo& sectionInfo ) {
++        m_currentTraversal.allSectionInfo.push_back( sectionInfo );
++        if ( incrementalOutputSupported() ) {
++            resetIncrementalOutput();
++            emitNewTrx( getTraversals() );
++        }
++    }
++
++    void VstestReporter::assertionEnded( const AssertionStats& assertionStats ) {
++        if ( !assertionStats.assertionResult.isOk() ) {
++            m_currentTraversal.addAssertion( assertionStats );
++        }
++    }
++
++    void VstestReporter::sectionEnded( const SectionStats& sectionStats ) {
++        m_currentTraversal.allSectionStats.push_back( sectionStats );
++    }
++
++    void VstestReporter::testCasePartialEnded(
++        const TestCaseStats& testCaseStats, uint64_t /*partNumber*/ ) {
++        // The section traversal is complete. Capture its redirected
++        // stdout/stderr (delivered per-traversal via TestCaseStats when
++        // ReporterPreferences::shouldRedirectStdOut is set) and finalize
++        // the traversal.
++        m_currentTraversal.getFlushedStdOut() << testCaseStats.stdOut;
++        m_currentTraversal.getFlushedStdErr() << testCaseStats.stdErr;
++        m_currentTraversal.finishTime = std::chrono::system_clock::now();
++        m_completedTraversals.push_back( std::move( m_currentTraversal ) );
++        m_currentTraversal = IncrementalSectionTraversal{};
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        auto& lastTraversal =
++            m_completedTraversals[m_completedTraversals.size() - 1];
++        m_currentTraversal.setRedirectSinksFromPredecessor( lastTraversal );
++#endif
++
++        if ( incrementalOutputSupported() ) {
++            resetIncrementalOutput();
++            emitNewTrx( getTraversals() );
++        }
++    }
++
++    void VstestReporter::testCaseEnded( const TestCaseStats& testCaseStats ) {
++        auto& traversal =
++            m_completedTraversals.empty() ||
++                    !m_currentTraversal.fatalSignalName.empty()
++                ? m_currentTraversal
++                : m_completedTraversals[m_completedTraversals.size() - 1];
++        traversal.getFlushedStdOut() << testCaseStats.stdOut;
++        traversal.getFlushedStdErr() << testCaseStats.stdErr;
++    }
++
++    void VstestReporter::testRunEnded( const TestRunStats& /*testRunStats*/ ) {
++        // When incremental output is supported, the final state was already
++        // written to disk at the last testCasePartialEnded emission; no
++        // additional emission is needed (and re-emitting would only churn
++        // the random GUIDs in the document).
++        if ( !incrementalOutputSupported() && !getTraversals().empty() ) {
++            emitNewTrx( getTraversals() );
++        }
++    }
++
++    void VstestReporter::fatalErrorEncountered( StringRef signalName ) {
++        m_currentTraversal.fatalSignalName = std::string( signalName );
++    }
++
++    std::vector<SectionTraversalRef> VstestReporter::getTraversals() {
++        std::vector<SectionTraversalRef> result;
++        for ( auto& traversal : m_completedTraversals ) {
++            result.push_back( std::ref( traversal ) );
++        }
++        if ( !m_currentTraversal.allSectionInfo.empty() ) {
++            result.push_back( std::ref( m_currentTraversal ) );
++        }
++        return result;
++    }
++
++    bool VstestReporter::incrementalOutputSupported() const {
++        // Incremental rewriting requires a real file backing (so we can
++        // reopen-and-truncate between emissions). Empty filename means the
++        // reporter is writing to stdout/console - fall back to single-shot
++        // emission at testRunEnded.
++        return !m_outputFilename.empty();
++    }
++
++    bool VstestReporter::perSectionRedirectedOutputSupported() const {
++#ifdef CATCH_CONFIG_EXPERIMENTAL_REDIRECT
++        return m_config->standardOutputRedirect() ||
++               m_config->standardErrorRedirect();
++#else
++        return false;
++#endif
++    }
++
++    void VstestReporter::resetIncrementalOutput() {
++        // Reopen the output file, which truncates it. Each incremental
++        // emission starts from an empty file rather than overwriting in
++        // place. Without truncation, an emission shorter than its
++        // predecessor would leave stale trailing bytes from the previous
++        // emission, producing malformed XML on disk.
++        m_incrementalOutputStream = makeStream( m_outputFilename );
++        m_outputStreamRef = m_incrementalOutputStream->stream();
++        // Opt out of upstream's std::unitbuf on the freshly-constructed
++        // FileStream (see VstestReporter constructor for rationale).
++        m_outputStreamRef.get() << std::nounitbuf;
++    }
++
++    void VstestReporter::emitNewTrx(
++        const std::vector<SectionTraversalRef>& traversals ) {
++        auto results = VstestResult::parseTraversals( traversals );
++
++        // If it's possible to use per-section output redirection *and* it's
++        // been opted into via the config, we'll emit output/error information
++        // on a per-traversal basis. Otherwise, we'll just emit it to the
++        // top-level result.
++        VstestTrxDocument::serialize( m_outputStreamRef.get(),
++                                      results,
++                                      m_sourcePathPrefix,
++                                      m_reportAttachmentPaths,
++                                      perSectionRedirectedOutputSupported() );
++    }
++
++} // end namespace Catch
+diff --git a/src/catch2/reporters/catch_reporter_vstest.hpp b/src/catch2/reporters/catch_reporter_vstest.hpp
+new file mode 100644
+index 00000000..05fd83ae
+--- /dev/null
++++ b/src/catch2/reporters/catch_reporter_vstest.hpp
+@@ -0,0 +1,254 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE_1_0.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#ifndef CATCH_REPORTER_VSTEST_HPP_INCLUDED
++#define CATCH_REPORTER_VSTEST_HPP_INCLUDED
++
++#include <catch2/catch_test_case_info.hpp>
++#include <catch2/interfaces/catch_interfaces_config.hpp>
++#include <catch2/internal/catch_istream.hpp>
++#include <catch2/internal/catch_output_redirect.hpp>
++#include <catch2/internal/catch_unique_ptr.hpp>
++#include <catch2/internal/catch_xmlwriter.hpp>
++#include <catch2/reporters/catch_reporter_streaming_base.hpp>
++
++#include <chrono>
++#include <functional>
++#include <iosfwd>
++#include <sstream>
++#include <string>
++#include <utility>
++#include <vector>
++
++#ifdef __clang__
++#    pragma clang diagnostic push
++#    pragma clang diagnostic ignored "-Wpadded"
++#endif
++
++namespace Catch {
++
++    // A "section traversal" represents a single, depth-first execution path
++    // within a test case. Each traversal corresponds to one
++    // testCasePartialStarting/Ended callback pair (the "partNumber"
++    // identifies the traversal within a test case).
++    class IncrementalSectionTraversal {
++    public:
++        IncrementalSectionTraversal();
++        IncrementalSectionTraversal( IncrementalSectionTraversal const& ) =
++            delete;
++        IncrementalSectionTraversal&
++        operator=( const IncrementalSectionTraversal& ) = delete;
++        IncrementalSectionTraversal( IncrementalSectionTraversal&& ) = default;
++        IncrementalSectionTraversal&
++        operator=( IncrementalSectionTraversal&& ) = default;
++
++        void addAssertion( const Catch::AssertionStats& assertion );
++
++        bool isComplete() const;
++        bool isOk() const;
++
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        void setRedirectSinksFromConfig( const Catch::IConfig* config );
++        void setRedirectSinksFromPredecessor(
++            IncrementalSectionTraversal& predecessor );
++#endif
++
++        std::vector<Catch::SectionInfo> allSectionInfo;
++        std::vector<Catch::SectionStats> allSectionStats;
++        std::vector<std::pair<Catch::AssertionStats, std::string>>
++            allAssertionsWithExpansions;
++
++        std::ostringstream& getFlushedStdOut();
++        std::ostringstream& getFlushedStdErr();
++
++        std::string fatalSignalName;
++        std::pair<std::string, size_t> fatalSignalSourceInfo;
++
++        Catch::TestRunInfo testRunInfo;
++        std::vector<Catch::Tag> testTags;
++
++        std::chrono::system_clock::time_point startTime;
++        std::chrono::system_clock::time_point finishTime;
++
++    private:
++        std::ostringstream m_stdOutStream;
++        std::ostringstream m_stdErrStream;
++#if defined(CATCH_CONFIG_EXPERIMENTAL_REDIRECT)
++        Catch::Detail::unique_ptr<Catch::OutputRedirectSink> m_stdOutSourceSink;
++        Catch::Detail::unique_ptr<Catch::OutputRedirectSink> m_stdErrSourceSink;
++#endif
++    };
++
++    using SectionTraversalRef =
++        std::reference_wrapper<IncrementalSectionTraversal>;
++
++    class VstestResult {
++    public:
++        static std::vector<VstestResult>
++        parseTraversals( const std::vector<SectionTraversalRef>& traversals );
++
++        const std::string testId;
++        const std::string testExecutionId;
++        std::vector<SectionTraversalRef> traversals;
++
++        bool isOk() const;
++
++        std::string getRootTestName() const;
++        std::string getRootRunName() const;
++        const std::vector<Catch::Tag> getRootTestTags() const;
++
++        std::chrono::system_clock::time_point getStartTime() const;
++        std::chrono::system_clock::time_point getFinishTime() const;
++
++    private:
++        VstestResult();
++    };
++
++    class VstestTrxDocument {
++    public:
++        static void serialize( std::ostream& stream,
++                               std::vector<VstestResult>& results,
++                               const std::string& sourcePrefix,
++                               const std::vector<std::string>& attachmentPaths,
++                               bool usePerTraversalOutputRedirection );
++
++    private:
++        VstestTrxDocument( std::ostream& stream,
++                           std::vector<VstestResult>& results,
++                           const std::string& sourcePrefix,
++                           const std::vector<std::string>& attachmentPaths,
++                           bool usePerTraversalOutputRedirection );
++
++    public:
++        enum class EmitOutput {
++            Stack = 1 << 0,
++            Message = 1 << 1,
++            StdOut = 1 << 2,
++            StdErr = 1 << 3,
++            Everything = 0xFFFF,
++        };
++
++    private:
++        void startWriteTestRun();
++        void writeTimes();
++        void writeResults();
++        void writeTopLevelResult( const VstestResult& result );
++        void writeTimestampAttributes(
++            std::chrono::system_clock::time_point start,
++            std::chrono::system_clock::time_point finish );
++        void startWriteTestResult( const VstestResult& result );
++        void startWriteTestResult( const std::string& testId,
++                                   const std::string& testExecutionId,
++                                   const std::string& testName );
++        void writeTraversalOutput( IncrementalSectionTraversal& traversal,
++                                   EmitOutput includeOptions );
++        void writeInnerResult( const VstestResult& result,
++                               IncrementalSectionTraversal& traversal );
++        void writeTestDefinitions();
++        void writeTestLists();
++        void writeTestEntries();
++        void writeSummary( const std::vector<std::string>& attachmentPaths );
++
++    private:
++        static std::string
++        getNormalizedPath( const std::string& unnormalizedPrefix );
++        void serializeSourceInfo( std::ostringstream& stream,
++                                  const std::string& file,
++                                  const size_t line );
++        std::string
++        getErrorMessageForTraversal( IncrementalSectionTraversal& traversal );
++        std::string
++        getStackMessageForTraversal( IncrementalSectionTraversal& traversal );
++        std::string
++        getFullTestNameForTraversal( IncrementalSectionTraversal& traversal );
++
++    private:
++        XmlWriter m_xml;
++        bool m_usePerTraversalOutputRedirection;
++        const std::vector<VstestResult> m_results;
++        const std::string m_sourcePrefix;
++        const std::vector<std::string> m_attachmentPaths;
++        const std::string m_defaultTestListId;
++    };
++
++    // VstestReporter emits Visual Studio Test (.trx) XML, suitable for
++    // ingestion by Azure DevOps Pipelines and similar tooling that consumes
++    // the VS Test schema. The .trx is emitted incrementally between test-case
++    // traversals when output is to a file (reopen-and-truncate between
++    // emissions for partial-result preservation across crashes), or once at
++    // testRunEnded when output is to stdout/console.
++    class VstestReporter : public StreamingReporterBase {
++    public:
++        VstestReporter( ReporterConfig&& _config );
++        ~VstestReporter() override = default;
++
++        static std::string getDescription();
++
++        void noMatchingTestCases( StringRef ) override {}
++        void reportInvalidTestSpec( StringRef ) override {}
++
++        void testRunStarting( TestRunInfo const& testRunInfo ) override;
++        void testCaseStarting( TestCaseInfo const& testCaseInfo ) override;
++        void testCasePartialStarting( TestCaseInfo const& testCaseInfo,
++                                      uint64_t partNumber ) override;
++        void sectionStarting( SectionInfo const& sectionInfo ) override;
++        void assertionStarting( AssertionInfo const& ) override {}
++        void assertionEnded( AssertionStats const& assertionStats ) override;
++        void sectionEnded( SectionStats const& sectionStats ) override;
++        void testCasePartialEnded( TestCaseStats const& testCaseStats,
++                                   uint64_t partNumber ) override;
++        void testCaseEnded( TestCaseStats const& testCaseStats ) override;
++        void testRunEnded( TestRunStats const& testRunStats ) override;
++        void fatalErrorEncountered( StringRef signalName ) override;
++
++    private:
++        std::vector<SectionTraversalRef> getTraversals();
++        bool incrementalOutputSupported() const;
++        bool perSectionRedirectedOutputSupported() const;
++        void resetIncrementalOutput();
++        void emitNewTrx( const std::vector<SectionTraversalRef>& traversals );
++
++        // Configuration parsed from customOptions in the constructor.
++        std::string m_sourcePathPrefix;
++        std::vector<std::string> m_reportAttachmentPaths;
++
++        // Output filename resolved in the constructor by matching this
++        // reporter's customOptions against m_config->getProcessedReporterSpecs().
++        // Empty when the reporter writes to stdout/console (in which case
++        // incremental rewriting is not supported).
++        std::string m_outputFilename;
++
++        // The active output stream. Initially aliases the inherited m_stream
++        // from ReporterBase. When incremental output is supported,
++        // resetIncrementalOutput() repoints this at a freshly-opened
++        // m_incrementalOutputStream (which truncates the underlying file).
++        std::reference_wrapper<std::ostream> m_outputStreamRef;
++        Detail::unique_ptr<IStream> m_incrementalOutputStream;
++
++        // Per-test-run / per-test-case bookkeeping.
++        Catch::TestRunInfo m_currentTestRunInfo;
++        std::vector<Catch::Tag> m_currentTestTags;
++
++        // Per-traversal collection.
++        std::vector<IncrementalSectionTraversal> m_completedTraversals;
++        IncrementalSectionTraversal m_currentTraversal;
++    };
++
++    VstestTrxDocument::EmitOutput
++    operator|( VstestTrxDocument::EmitOutput lhs,
++               VstestTrxDocument::EmitOutput rhs );
++    VstestTrxDocument::EmitOutput
++    operator&( VstestTrxDocument::EmitOutput lhs,
++               VstestTrxDocument::EmitOutput rhs );
++
++} // end namespace Catch
++
++#ifdef __clang__
++#    pragma clang diagnostic pop
++#endif
++
++#endif // CATCH_REPORTER_VSTEST_HPP_INCLUDED
+-- 
+2.53.0.vfs.0.7
+

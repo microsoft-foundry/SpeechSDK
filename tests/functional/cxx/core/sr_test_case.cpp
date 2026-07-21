@@ -1,0 +1,306 @@
+//
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+//
+
+#include "stdafx.h"
+
+#include <chrono>
+#include <thread>
+#include <random>
+#include <string>
+
+#include "test_utils.h"
+#include "thread_service.h"
+#include "guid_utils.h"
+
+using namespace std::chrono;
+using namespace Microsoft::CognitiveServices::Speech;
+using namespace Microsoft::CognitiveServices::Speech::Impl;
+
+const std::vector<ISpxThreadService::Affinity> g_affinities =
+    {
+        ISpxThreadService::Affinity::User,
+        ISpxThreadService::Affinity::Background};
+
+SPXTEST_CASE_BEGIN("ThreadService: Start/Stop", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Init());
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Term not initialized", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Term twice - term is idempotent", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Term());
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Execute tasks on background/user threads", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+
+    REQUIRE_NOTHROW(service->Init());
+
+    for (auto affinity : g_affinities)
+    {
+        std::vector<std::thread::id> ids;
+        const size_t NumIterations = 10;
+        std::vector<std::future<void>> futures;
+        for (size_t i = 0; i < NumIterations; ++i)
+        {
+            std::packaged_task<void()> task([&ids]() { ids.push_back(std::this_thread::get_id()); });
+            futures.emplace_back(task.get_future());
+            REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task), affinity));
+        }
+
+        for (auto& f : futures)
+            f.get();
+
+        SPXTEST_REQUIRE(ids.size() == NumIterations);
+        auto expected = ids.front();
+        SPXTEST_REQUIRE(std::this_thread::get_id() != expected);
+        for (auto& id : ids)
+        {
+            SPXTEST_REQUIRE(id == expected);
+        }
+    }
+
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: User and background threads are different", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    std::vector<std::thread::id> ids;
+
+    REQUIRE_NOTHROW(service->Init());
+
+    std::mutex locker;
+
+    std::vector<std::future<void>> futures;
+    std::packaged_task<void()> taskUser([&ids, &locker]()
+    {
+        std::unique_lock<std::mutex> lock(locker);
+        ids.push_back(std::this_thread::get_id());
+    });
+    futures.emplace_back(taskUser.get_future());
+
+    std::packaged_task<void()> taskBackground([&ids, &locker]()
+    {
+        std::unique_lock<std::mutex> lock(locker);
+        ids.push_back(std::this_thread::get_id());
+    });
+    futures.emplace_back(taskBackground.get_future());
+
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskUser), ISpxThreadService::Affinity::User));
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskBackground), ISpxThreadService::Affinity::Background));
+
+    for (auto& f : futures)
+        f.get();
+
+    REQUIRE_NOTHROW(service->Term());
+
+    SPXTEST_REQUIRE(ids.size() == 2);
+    SPXTEST_REQUIRE(ids[0] != ids[1]);
+    SPXTEST_REQUIRE(ids[0] != std::this_thread::get_id());
+    SPXTEST_REQUIRE(ids[1] != std::this_thread::get_id());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Throw in a task and next task succeeds", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+
+    REQUIRE_NOTHROW(service->Init());
+
+    for (auto affinity : g_affinities)
+    {
+        std::packaged_task<void()> taskBad([]()
+        {
+            throw std::runtime_error("Bad happened");
+        });
+        std::future<void> futureBad = taskBad.get_future();
+
+        REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskBad), affinity));
+        SPXTEST_REQUIRE_THROWS_WITH_CONTAINS(futureBad.get(), "Bad happened");
+
+        int counter = 0;
+        std::packaged_task<void()> taskGood([&counter]() { ++counter; });
+        std::future<void> futureGood = taskGood.get_future();
+
+        REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskGood), affinity));
+        REQUIRE_NOTHROW(futureGood.get());
+        SPXTEST_REQUIRE(counter == 1);
+    }
+
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Schedule several timers.", "[thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+
+    REQUIRE_NOTHROW(service->Init());
+
+    int counter = 0;
+    milliseconds duration500, duration1500, duration2500;
+    auto last = system_clock::now();
+
+    std::packaged_task<void()> taskAfter500ms([&]()
+    {
+        duration500 = duration_cast<milliseconds>(system_clock::now() - last);
+        counter++;
+    });
+
+    std::packaged_task<void()> taskAfter1500ms([&]()
+    {
+        duration1500 = duration_cast<milliseconds>(system_clock::now() - last);
+        counter++;
+    });
+
+    std::packaged_task<void()> taskAfter2500ms([&]()
+    {
+        duration2500 = duration_cast<milliseconds>(system_clock::now() - last);
+        counter++;
+    });
+
+    last = system_clock::now();
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskAfter2500ms), milliseconds(2500)));
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskAfter1500ms), milliseconds(1500)));
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(taskAfter500ms), milliseconds(500)));
+
+    std::this_thread::sleep_for(seconds(5));
+    SPXTEST_REQUIRE(counter == 3);
+
+    SPX_TRACE_INFO("Expected 500 ms task took : %s", std::to_string(duration500.count()).c_str());
+    SPX_TRACE_INFO("Expected 1500 ms task took : %s", std::to_string(duration1500.count()).c_str());
+    SPX_TRACE_INFO("Expected 2500 ms task took : %s", std::to_string(duration2500.count()).c_str());
+
+    SPXTEST_REQUIRE(duration500 < duration1500);
+    SPXTEST_REQUIRE(duration1500 < duration2500);
+
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Shutdown with immediate tasks and timers", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+
+    REQUIRE_NOTHROW(service->Init());
+
+    int counter = 0;
+    const int NumIterations = 1000;
+
+    // Schedule a timer task, shutdown can still happen if there are some timer tasks.
+    for (int i = 0; i < NumIterations / 2; ++i)
+    {
+        std::packaged_task<void()> timer([&]()
+        {
+            std::this_thread::sleep_for(milliseconds(5));
+            counter++;
+        });
+
+        REQUIRE_NOTHROW(service->ExecuteAsync(std::move(timer), milliseconds(100)));
+    }
+
+    // Schedule immediate tasks.
+    for (int i = 0; i < NumIterations/2; ++i)
+    {
+        std::packaged_task<void()> task([&]() { std::this_thread::sleep_for(milliseconds(5)); counter++; });
+        REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task)));
+    }
+
+    REQUIRE_NOTHROW(service->Term());
+    SPXTEST_REQUIRE(counter < NumIterations);
+
+    int counterOld = counter;
+    std::this_thread::sleep_for(seconds(3));
+    SPXTEST_REQUIRE(counterOld == counter);
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Shutdown on a background thread fails", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Init());
+    std::packaged_task<void()> task([&]()
+    {
+        SPXTEST_REQUIRE_THROWS_WITH_CONTAINS(service->Term(), "ABORT");
+    });
+
+    auto future = task.get_future();
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task)));
+    REQUIRE_NOTHROW(future.get());
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Shutdown on a user thread succeeds", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Init());
+    std::packaged_task<void()> task([&]()
+    {
+        REQUIRE_NOTHROW(service->Term());
+    });
+
+    auto future = task.get_future();
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task), ISpxThreadService::Affinity::User));
+    REQUIRE_NOTHROW(future.get());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Synchronous execution", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Init());
+    int counter = 0;
+    std::packaged_task<void()> task([&]()
+    {
+        counter++;
+    });
+
+    REQUIRE_NOTHROW(service->ExecuteSync(std::move(task)));
+    SPXTEST_REQUIRE(counter == 1);
+    REQUIRE_NOTHROW(service->Term());
+}SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("ThreadService: Async with promise", "[sr][thread_service]")
+{
+    auto service = std::make_shared<CSpxThreadService>();
+    REQUIRE_NOTHROW(service->Init());
+
+    int counter = 0;
+    std::packaged_task<void()> task1([&]()
+    {
+        std::this_thread::sleep_for(5s);
+        counter++;
+    });
+    auto task1Future = task1.get_future();
+
+    std::packaged_task<void()> task2([&]()
+    {
+        counter++;
+    });
+
+    std::promise<bool> task1Finished;
+    auto task1FinishedFuture = task1Finished.get_future();
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task1), ISpxThreadService::Affinity::Background,
+        std::move(task1Finished)));
+
+    std::promise<bool> task2Finished;
+    auto task2FinishedFuture = task2Finished.get_future();
+    REQUIRE_NOTHROW(service->ExecuteAsync(std::move(task2), ISpxThreadService::Affinity::Background,
+        std::move(task2Finished)));
+    std::this_thread::sleep_for(2s);
+    REQUIRE_NOTHROW(service->Term());
+
+    REQUIRE_NOTHROW(task1Future.get());
+    REQUIRE(task1FinishedFuture.get() == true);
+    REQUIRE(task2FinishedFuture.get() == false);
+    REQUIRE(counter == 1);
+}SPXTEST_CASE_END()

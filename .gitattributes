@@ -1,0 +1,129 @@
+.classpath text
+.dockerignore text
+.editorconfig text
+.flake8 text
+.gitattributes text
+.gitignore text
+.gitmodules text
+.npmignore text
+.npmrc text
+.project text
+.sscignore text
+consumer-rules.pro text
+Dockerfile text
+Dockerfile* text
+gradlew text
+LICENSE text
+Makefile text
+makefile text
+Podfile text
+proguard-rules.pro text
+setup_speech.cfg text
+
+*.appxmanifest text
+*.asset text
+*.awk text
+*.axml text
+*.bat text
+*.bats text
+*.c text
+*.cmake text
+*.cmd text
+*.conf text
+*.config text
+*.cpp text
+*.cs text
+*.csproj text
+*.Dockerfile text
+*.entitlements text
+*.expect text
+*.gradle text
+*.h text
+*.hpp text
+*.html text
+*.i text
+*.in text
+*.ini text
+*.java text
+*.js text
+*.json text
+*.kt text
+*.kts text
+*.lock text
+*.m text
+*.md text
+*.mf text
+*.MF text
+*.meta text
+*.mk text
+*.modulemap text
+*.mm text
+*.nuspec text
+*.pbxproj text
+*.php text
+*.pl text
+*.plist text
+*.podspec text
+*.prefs text
+*.project text
+*.properties text
+*.props text
+*.ps1 text
+*.py text
+*.rb text
+*.rc text
+*.rst text
+*.runsettings text
+*.sln text
+*.storyboard text
+*.swg text
+*.swift text
+*.targets text
+*.template text
+*.toml text
+*.ts text
+*.tsx text
+*.txt text
+*.vcxproj text
+*.vcxproj.filters text
+*.vcxproj.user text
+*.xaml text
+*.xaml.cs text
+*.xcscheme text
+*.xcscmblueprint text
+*.xcworkspacedata text
+*.xib text
+*.xml text
+*.xsd text
+*.yml text
+*.yaml text
+*.xctestplan text
+*.gdnsuppress text
+ci/sdl/global.gdnsuppress text
+
+# Bash and "git apply" only like Unix line endings
+*.sh text eol=lf
+*.bats text eol=lf
+*.patch text eol=lf
+
+# Extensionless bash scripts
+scripts/setup text eol=lf
+scripts/verify text eol=lf
+
+# Binary extensions:
+*.a binary
+*.bmp binary
+.class binary
+*.exe binary
+*.jar binary
+*.jpg binary
+*.lib binary
+*.mp3 binary
+*.pcm binary
+*.pfx binary
+*.png binary
+*.snk binary
+*.wav binary
+*.zip binary
+*.pdf binary
+*.webp binary

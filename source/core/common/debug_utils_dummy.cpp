@@ -1,0 +1,26 @@
+//
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+//
+// debug_utils_dummy.cpp is a dummy implementation of debug info.
+//
+#include "stdafx.h"
+#include "debug_utils.h"
+
+namespace Debug {
+
+    std::string GetCallStack(size_t skipLevels/* = 0*/)
+    {
+        UNUSED(skipLevels);
+        return "GetCallStack not implemented on this platform\n";
+    }
+
+    void SignalHandler(int sig)
+    {
+        UNUSED(sig);
+    }
+
+    void HookSignalHandlers()
+    {
+    }
+}

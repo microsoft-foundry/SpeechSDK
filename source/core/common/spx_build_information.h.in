@@ -1,0 +1,39 @@
+//
+// Copyright (c) Microsoft. All rights reserved.
+// Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
+//
+// Note: This is a generated file, do not modify directly!
+//
+// CMake generates it from spx_build_information.h.in at configuration time based on CMake
+// configuration properties. Edit spx_build_information.h.in if necessary and re-run CMake
+// configuration to refresh.
+//
+
+#pragma once
+
+namespace Microsoft {
+namespace CognitiveServices {
+namespace Speech {
+namespace Impl {
+namespace BuildInformation {
+
+    static constexpr const bool g_isPrerelease = ${SPEECHSDK_ISPRERELEASE};
+    static constexpr const int g_majorVersion = ${SPEECHSDK_MAJOR};
+    static constexpr const int g_minorVersion = ${SPEECHSDK_MINOR};
+    static constexpr const int g_patchVersion = ${SPEECHSDK_PATCH};
+
+    static constexpr const char *g_fullSpeechVersion = "${SPEECHSDK_VERSION}";
+
+    // Even though this value is not build-generated, it is defined here because it
+    // commonly gets used together with g_fullSpeechVersion.
+    static constexpr const char *g_SpeechSDKName = "SpeechSDK";
+
+    static constexpr const char *g_buildType = "${CARBONSDK_BUILD_TYPE}";
+    static constexpr const char *g_buildPlatform = "${CARBONSDK_TARGET_PLATFORM}";
+#ifdef CARBONSDK_BUILD_CORE_ONLY
+    static constexpr const char *g_programmingLanguage = "cpp-src";
+#else
+    static constexpr const char *g_programmingLanguage = "cpp";
+#endif
+
+} } } } } // Microsoft::CognitiveServices::Speech::Impl::BuildInformation
