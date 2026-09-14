@@ -29,9 +29,6 @@ namespace Impl {
     // Event<>::Add or operator+= leave the handler holding a dangling pointer
     // when the registering object is destroyed before an in-flight Raise
     // finishes invoking from its snapshot.
-    //
-    // See docs/architecture/core-architecture/lifetime-safety-invariants.md
-    // invariants 2 and 3.
     template<typename ...Args>
     class Event
     {

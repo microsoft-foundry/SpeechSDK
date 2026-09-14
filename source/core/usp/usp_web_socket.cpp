@@ -60,9 +60,7 @@ namespace USP {
         std::shared_ptr<UspWebSocket> instance{ new UspWebSocket(webSocket) };
 
         // Connect web socket event handlers using the safe
-        // Event<>::Add(shared_ptr, &method) overload. See
-        // docs/architecture/core-architecture/lifetime-safety-invariants.md
-        // invariant 2.
+        // Event<>::Add(shared_ptr, &method) overload.
         webSocket->OnBinaryData.Add(instance, &UspWebSocket::HandleBinaryData);
         webSocket->OnConnected.Add(instance, &UspWebSocket::HandleConnected);
         webSocket->OnDisconnected.Add(instance, &UspWebSocket::HandleDisconnected);

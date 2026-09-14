@@ -86,10 +86,6 @@ void CSpxSynthesizer::Term()
     // m_syncCallbacksThreadService (event-dispatch tasks) hold tasks that
     // reach into m_ttsAdapter and synthesizer-internal state; stopping them
     // first ensures no worker is executing when those members are freed.
-    //
-    // See docs/architecture/core-architecture/lifetime-safety-invariants.md
-    // invariant 1 (threadservice owners must Term the threadservice before
-    // destroying members the worker may call into).
     SpxTermAndClear(m_threadService);
     SpxTermAndClear(m_syncCallbacksThreadService);
     SpxTermAndClear(m_ttsAdapter);

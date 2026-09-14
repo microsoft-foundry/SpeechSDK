@@ -225,13 +225,16 @@ SPXTEST_CASE_BEGIN("ThreadService: Shutdown with immediate tasks and timers", "[
     SPXTEST_REQUIRE(counterOld == counter);
 }SPXTEST_CASE_END()
 
-SPXTEST_CASE_BEGIN("ThreadService: Shutdown on a background thread fails", "[sr][thread_service]")
+SPXTEST_CASE_BEGIN("ThreadService: Shutdown on a background thread succeeds", "[sr][thread_service]")
 {
     auto service = std::make_shared<CSpxThreadService>();
     REQUIRE_NOTHROW(service->Init());
     std::packaged_task<void()> task([&]()
     {
-        SPXTEST_REQUIRE_THROWS_WITH_CONTAINS(service->Term(), "ABORT");
+        // Stopping the service from within its own background task must not abort. A thread cannot
+        // join itself, so the worker detaches instead of self-joining and unwinds cleanly. This is
+        // the field scenario where an object is destroyed inside one of its own event callbacks.
+        REQUIRE_NOTHROW(service->Term());
     });
 
     auto future = task.get_future();
