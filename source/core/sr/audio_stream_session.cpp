@@ -164,9 +164,6 @@ void CSpxAudioStreamSession::Term()
     // Stopping all threads. Must complete before any member the threadservice
     // workers may call into (audio shim, codec adapter, recognizer adapter,
     // etc.) is destroyed below.
-    //
-    // See docs/architecture/core-architecture/lifetime-safety-invariants.md
-    // invariant 1.
     SpxTerm(m_threadService);
 
     // Make sure there is nobody waiting on a single shot.

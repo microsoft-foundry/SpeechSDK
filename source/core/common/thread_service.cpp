@@ -228,12 +228,25 @@ namespace Microsoft { namespace CognitiveServices { namespace Speech { namespace
         // Cancel all pending tasks
         auto guard = Utils::MakeScopeGuard([&] { CancelAllTasks(); });
 
-        // Disallow stopping the caller thread
+        // This happens when the object that OWNS this thread service is destroyed from within a
+        // task the worker is currently running -- i.e. the owner's last reference is released on
+        // this worker thread, so its destructor (and therefore this Stop() call) execute here.
+        // Any thread service owner can hit this; a TTS synthesizer destroyed inside one of its own
+        // event callbacks is just the case we first observed.
+        //
+        // We cannot join() here: a thread cannot wait for itself to finish (self-join is undefined
+        // behavior). We also cannot throw: Stop() is reached from a noexcept destructor, so any
+        // exception would terminate the process.
+        //
+        // So we detach instead. Detaching is safe because the worker was started holding a
+        // shared_ptr to itself (shared_from_this(), see Start()), which keeps the Thread object
+        // alive until the loop finishes on its own. The worker loop never accesses the owner, so
+        // the owner can be torn down as soon as this call returns.
         auto isThisThread = m_thread.get_id() == std::this_thread::get_id();
         if (isThisThread && !forceDetach)
         {
-            SPX_TRACE_ERROR("Thread cannot be stopped from its own task.");
-            SPX_THROW_HR(SPXERR_ABORT);
+            SPX_TRACE_WARNING("Thread is being stopped from its own task; detaching to avoid self-join.");
+            forceDetach = true;
         }
 
         // Notify the WorkerLoop to stop

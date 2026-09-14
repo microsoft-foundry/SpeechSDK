@@ -80,9 +80,6 @@ protected:
         // This ensures callbacks cannot dereference a destroyed
         // delegate-impl, even if Raise has already snapshotted the handler
         // list at the moment destruction completes.
-        //
-        // See docs/architecture/core-architecture/lifetime-safety-invariants.md
-        // invariant 2 (Event<>::Add registrations must use the safe overload).
         using SelfType = ISpxWebSocketDelegateImpl<DelegateToHelperT>;
         auto baseSelf = this->shared_from_this();
         auto self = std::static_pointer_cast<SelfType>(baseSelf);
