@@ -194,6 +194,7 @@ constexpr const char* SINGLE_UTTERANCE_FLAC = "SingleUtteranceFLAC";
 constexpr const char* SINGLE_UTTERANCE_G722 = "SingleUtteranceG722";
 constexpr const char* SINGLE_UTTERANCE_3X = "SingleUtterance3x";
 constexpr const char* SINGLE_UTTERANCE_MULTIPLE_TURNS = "SingleUtteranceMultipleTurns";
+constexpr const char* SILENCE_CONTOSO_SILENCE_CONTOSO = "SilenceContosoSilenceContoso";
 constexpr const char* SINGLE_UTTERANCE_CATALAN = "SingleUtteranceCatalan";
 constexpr const char* MULTIPLE_UTTERANCE_ENGLISH = "MultipleUtteranceEnglish";
 constexpr const char* AUDIO_44_1KHZ = "Audio441Khz";

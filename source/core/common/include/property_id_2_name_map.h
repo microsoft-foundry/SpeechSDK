@@ -97,6 +97,7 @@ constexpr const char* GetPropertyName(const PropertyId id)
     case PropertyId::AudioConfig_AudioProcessingOptions: return "AudioConfig_AudioProcessingOptions";
     case PropertyId::AudioProcessing_EchoCancellationModelPath: return "EcModelFilePath";
     case PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelPath: return "PnsModelFilePath";
+    case PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelLicense: return "PnsModelLicense";
     case PropertyId::Speech_LogFilename: return "SPEECH-LogFilename";
     case PropertyId::Speech_SegmentationSilenceTimeoutMs: return "SPEECH-SegmentationSilenceTimeoutMs";
     case PropertyId::Speech_SegmentationMaximumTimeMs: return "SPEECH-SegmentationMaximumTimeMs";
@@ -207,6 +208,10 @@ constexpr auto g_keywordRecognitionUserDefinedWakeWords = "KeywordRecognition_Us
 
 constexpr auto g_phraseListWeightPropertyName = "SPEECH-PhraseListWeight";
 constexpr auto g_stopRecognitionTimeoutPropertyName = "SPEECH-StopRecognitionTimeoutInSeconds";
+
+// Conversation mode (StartContinuousRecognition) disconnect/silence-timeout default behavior flag (set via the public
+// EnableLegacyDefaultDisconnectSilenceTimeout API).
+constexpr auto g_continuousLegacyDefaultDisconnectSilenceTimeout = "Continuous-LegacyDefaultDisconnectSilenceTimeout";
 
 constexpr auto g_imageWidth = "ImageFormat_width";
 constexpr auto g_imageHeight = "ImageFormat_height";

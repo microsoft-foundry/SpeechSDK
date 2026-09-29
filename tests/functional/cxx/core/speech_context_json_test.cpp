@@ -305,7 +305,9 @@ private:
 class CSpxUspRecoEngineAdapterTest
 {
 public:
-    CSpxUspRecoEngineAdapterTest()
+    // singleShot == true models INTERACTIVE / single-shot recognition (RecognizeOnce);
+    // singleShot == false models CONVERSATION / continuous recognition
+    explicit CSpxUspRecoEngineAdapterTest(bool singleShot = true)
     {
         m_session = std::make_shared<TestCSpxAudioStreamSession>();
         m_session->SetSite(SpxGetRootSite());
@@ -313,12 +315,22 @@ public:
         m_session->AddRecognizer(recognizer);
         auto site = SpxQueryInterface<ISpxGenericSite>(m_session);
         m_adapter.SetSite(site);
-        m_adapter.ResolveRecoMode(true);
+        m_adapter.m_singleShot = singleShot;
+        SetRecoMode(singleShot ? "INTERACTIVE" : "CONVERSATION");
     }
 
     std::string GetSpeechContextJson()
     {
         return m_adapter.GetSpeechContextJson();
+    }
+
+    // Sets the reco mode property directly (overwriting any inherited value), modeling a
+    // session that has already resolved its recognition mode. Use "INTERACTIVE",
+    // "CONVERSATION", or "DICTATION".
+    void SetRecoMode(const char* recoMode)
+    {
+        m_session->GetPropertiesPtr()->SetStringValue(
+            GetPropertyName(PropertyId::SpeechServiceConnection_RecoMode), recoMode);
     }
 
     void SetEndpointType(USP::EndpointType endpointType)
@@ -444,6 +456,29 @@ SPXTEST_CASE_BEGIN("speech.context JSON generation", "[context_json]")
         expectedJson["phraseDetection"]["language"] = "en-us";
         expectedJson["phraseDetection"]["mode"] = "INTERACTIVE";
         adapterTest.RequireJsonMatch(expectedJson.AsJson());
+    }
+
+    SPXTEST_SECTION("Model")
+    {
+        session->GetPropertiesPtr()->SetStringValue("SPEECH-ModelName", "mai-transcribe-2");
+        expectedJson["phraseDetection"]["language"] = "en-us";
+        expectedJson["phraseDetection"]["mode"] = "INTERACTIVE";
+        expectedJson["model"]["name"] = "mai-transcribe-2";
+        adapterTest.RequireJsonMatch(expectedJson.AsJson());
+
+        // options is optional: emitted only when SPEECH-ModelOptions is set
+        session->GetPropertiesPtr()->SetStringValue("SPEECH-ModelOptions", R"({"key":"value"})");
+        expectedJson["model"]["options"] = ajv::json::Parse(R"({"key":"value"})");
+        adapterTest.RequireJsonMatch(expectedJson.AsJson());
+        session->GetPropertiesPtr()->SetStringValue("SPEECH-ModelOptions", "");
+
+        session->GetPropertiesPtr()->SetStringValue("SPEECH-ModelName", "");
+
+        ajv::JsonBuilder clearedExpectedJson;
+        clearedExpectedJson["audio"]["streams"]["1"] = nullptr;
+        clearedExpectedJson["phraseDetection"]["language"] = "en-us";
+        clearedExpectedJson["phraseDetection"]["mode"] = "INTERACTIVE";
+        adapterTest.RequireJsonMatch(clearedExpectedJson.AsJson());
     }
 
     SPXTEST_SECTION("DGI")
@@ -1061,5 +1096,100 @@ SPXTEST_CASE_BEGIN("PostProcessingOption custom value passes through to service"
     expectedJson["phraseDetection"]["enrichment"]["interactive"]["postprocessingoption"] = "CustomOption";
 
     adapterTest.RequireJsonContains(expectedJson.AsJson());
+}
+SPXTEST_CASE_END()
+
+SPXTEST_CASE_BEGIN("CONVERSATION-mode disconnect silence timeout defaults", "[context_json][silencetimeout]")
+{
+    // Verifies the CONVERSATION-mode default silence timeout behavior:
+    //   * By default the legacy behavior is enabled, so unspecified timeouts are omitted.
+    //   * Explicitly disabling the legacy behavior emits
+    //     phraseDetection.initialSilenceTimeout = 0 and
+    //     phraseDetection.trailingSilenceTimeout = 0.
+    //   * Explicitly enabling the legacy behavior also omits the fields.
+    //   * Single-shot (INTERACTIVE) recognition never emits these defaults.
+    //   * Continuous DICTATION recognition never emits these defaults; the default
+    //     IST/EST=0 are scoped to CONVERSATION mode, not to every non-single-shot session.
+    //   * An explicit user-provided timeout is always honored regardless of mode/flag.
+
+    const char* kLegacyFlag = "Continuous-LegacyDefaultDisconnectSilenceTimeout";
+
+    SPXTEST_SECTION("CONVERSATION mode, legacy flag absent -> timeouts omitted")
+    {
+        CSpxUspRecoEngineAdapterTest adapterTest(/*singleShot*/ false);
+
+        auto actualJson = adapterTest.GetSpeechContextJson();
+        SPXTEST_CHECK(actualJson.find("\"initialSilenceTimeout\"") == std::string::npos);
+        SPXTEST_CHECK(actualJson.find("\"trailingSilenceTimeout\"") == std::string::npos);
+    }
+
+    SPXTEST_SECTION("CONVERSATION mode, legacy flag false -> IST=0 and EST=0 emitted")
+    {
+        CSpxUspRecoEngineAdapterTest adapterTest(/*singleShot*/ false);
+        auto session = adapterTest.GetSession();
+        session->GetPropertiesPtr()->SetStringValue(kLegacyFlag, "false");
+
+        ajv::JsonBuilder expectedJson;
+        expectedJson["audio"]["streams"]["1"] = nullptr;
+        expectedJson["phraseDetection"]["initialSilenceTimeout"] = 0;
+        expectedJson["phraseDetection"]["trailingSilenceTimeout"] = 0;
+
+        adapterTest.RequireJsonContains(expectedJson.AsJson());
+    }
+
+    SPXTEST_SECTION("CONVERSATION mode, legacy flag on -> timeouts omitted")
+    {
+        CSpxUspRecoEngineAdapterTest adapterTest(/*singleShot*/ false);
+        auto session = adapterTest.GetSession();
+        session->GetPropertiesPtr()->SetStringValue(kLegacyFlag, "true");
+
+        auto actualJson = adapterTest.GetSpeechContextJson();
+        SPXTEST_CHECK(actualJson.find("\"initialSilenceTimeout\"") == std::string::npos);
+        SPXTEST_CHECK(actualJson.find("\"trailingSilenceTimeout\"") == std::string::npos);
+    }
+
+    SPXTEST_SECTION("single-shot (INTERACTIVE) mode, legacy flag false -> timeouts omitted")
+    {
+        // The harness defaults to single-shot / INTERACTIVE (m_singleShot == true).
+        CSpxUspRecoEngineAdapterTest adapterTest;
+        auto session = adapterTest.GetSession();
+        session->GetPropertiesPtr()->SetStringValue(kLegacyFlag, "false");
+
+        auto actualJson = adapterTest.GetSpeechContextJson();
+        SPXTEST_CHECK(actualJson.find("\"initialSilenceTimeout\"") == std::string::npos);
+        SPXTEST_CHECK(actualJson.find("\"trailingSilenceTimeout\"") == std::string::npos);
+    }
+
+    SPXTEST_SECTION("continuous DICTATION mode, legacy flag false -> timeouts omitted")
+    {
+        // Continuous DICTATION also has m_singleShot == false, but the feature of
+        // sending IST/EST=0 bt default is scoped to CONVERSATION mode only, so
+        // DICTATION must not emit IST=0/EST=0.
+        CSpxUspRecoEngineAdapterTest adapterTest(/*singleShot*/ false);
+        auto session = adapterTest.GetSession();
+        session->GetPropertiesPtr()->SetStringValue(kLegacyFlag, "false");
+        adapterTest.SetRecoMode("DICTATION");
+
+        auto actualJson = adapterTest.GetSpeechContextJson();
+        SPXTEST_CHECK(actualJson.find("\"initialSilenceTimeout\"") == std::string::npos);
+        SPXTEST_CHECK(actualJson.find("\"trailingSilenceTimeout\"") == std::string::npos);
+    }
+
+    SPXTEST_SECTION("explicit user timeouts honored in CONVERSATION mode")
+    {
+        CSpxUspRecoEngineAdapterTest adapterTest(/*singleShot*/ false);
+        auto session = adapterTest.GetSession();
+        session->GetPropertiesPtr()->SetStringValue(
+            GetPropertyName(PropertyId::SpeechServiceConnection_InitialSilenceTimeoutMs), "3500");
+        session->GetPropertiesPtr()->SetStringValue(
+            GetPropertyName(PropertyId::SpeechServiceConnection_EndSilenceTimeoutMs), "700");
+
+        ajv::JsonBuilder expectedJson;
+        expectedJson["audio"]["streams"]["1"] = nullptr;
+        expectedJson["phraseDetection"]["initialSilenceTimeout"] = 3500;
+        expectedJson["phraseDetection"]["trailingSilenceTimeout"] = 700;
+
+        adapterTest.RequireJsonContains(expectedJson.AsJson());
+    }
 }
 SPXTEST_CASE_END()

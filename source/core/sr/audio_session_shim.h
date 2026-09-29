@@ -64,6 +64,7 @@ public:
     // ISpxAudioSessionShim
     void StartAudio() final;
     void StopAudio() final;
+    void ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId) final;
 
     inline SpxWaveFormatEx GetFormat() final
     {

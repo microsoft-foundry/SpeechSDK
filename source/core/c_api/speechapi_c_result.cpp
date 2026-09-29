@@ -154,6 +154,17 @@ SPXAPI result_get_duration(SPXRESULTHANDLE hresult, uint64_t* duration)
     SPXAPI_CATCH_AND_RETURN_HR(hr);
 }
 
+SPXAPI result_get_commit_token(SPXRESULTHANDLE hresult, uint32_t* commitToken)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, commitToken == nullptr);
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto result = SpxGetPtrFromHandle<ISpxRecognitionResult>(hresult);
+        *commitToken = result->GetCommitToken();
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
 SPXAPI result_get_channel(SPXRESULTHANDLE hresult, uint32_t* channel)
 {
     SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, channel == nullptr);

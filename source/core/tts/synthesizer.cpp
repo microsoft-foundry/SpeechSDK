@@ -292,6 +292,13 @@ std::shared_ptr<ISpxSynthesisResult> CSpxSynthesizer::ExecuteSynthesis(const std
         remainingTime = 5 * 60 * 1000; // 5 minutes for completed synthesis
     }
 
+    // If Write() caught a codec-init exception for this turn, skip the
+    // decoder loop entirely.
+    if (m_pendingWriteInitError)
+    {
+        m_decodingDone = true;
+    }
+
     while (!m_decodingDone && remainingTime > 0)
     {
         if (synthesisDoneResult->GetReason() == ResultReason::SynthesizingAudioCompleted && PAL::GetMillisecondsSinceEpoch() - m_decodingStartedTime > 2000 && AudioLengthOfCurrentTurn() < 320)
@@ -336,6 +343,12 @@ std::shared_ptr<ISpxSynthesisResult> CSpxSynthesizer::ExecuteSynthesis(const std
     auto resultInit = SpxQueryInterface<ISpxSynthesisResultInit>(synthesisDoneResult);
     // Update result format
     resultInit->SetAudioFormat(m_format->outputFormat, m_format->hasHeader);
+
+    // Update error if Write() caught a codec-init exception on this turn.
+    if (m_pendingWriteInitError)
+    {
+        resultInit->UpdateError(m_pendingWriteInitError);
+    }
     // Update error if decoding failed
     if (decodingError)
     {
@@ -398,6 +411,11 @@ std::shared_ptr<ISpxSynthesisResult> CSpxSynthesizer::ExecuteSynthesis(const std
     m_audioOfCurrentTurn.reset();
     m_audioDataStream.reset();
     m_codecAdapter.reset();
+    m_decodingStartedTime = 0;
+
+    // Clear per-turn Write() init failure state.
+    m_pendingWriteInitError.reset();
+    m_writeInitFailureReportedForRequest.clear();
 
     if (isSsml && synthesisDoneResult->GetReason() == ResultReason::SynthesizingAudioCompleted && cacheKey.empty())
     {
@@ -739,6 +757,24 @@ void CSpxSynthesizer::FireTokenRequest()
     TokenRequested.Signal(tokenRequestEvent);
 }
 
+void CSpxSynthesizer::RecordWriteInitFailure(
+    const std::string& requestId,
+    const std::shared_ptr<ISpxErrorInformation>& error)
+{
+    // Record this requestId as "already reported" so that subsequent audio
+    // chunks on the same failed turn drain silently at the top of Write().
+    m_writeInitFailureReportedForRequest = requestId;
+
+    // Write() may fail after setting m_decodingDone = false (e.g. when
+    // codecAdapter->Read(nullptr, 0) throws). Make sure StopSpeaking() does
+    // not block waiting for decoding to finish when decoding never started.
+    m_decodingDone = true;
+
+    // Store the error for ExecuteSynthesis to promote it to a single
+    // terminal result via UpdateError().
+    m_pendingWriteInitError = error;
+}
+
 uint32_t CSpxSynthesizer::Write(ISpxTtsEngineAdapter*, const std::string& requestId, uint8_t* buffer,
                                 uint32_t size, std::shared_ptr<std::map<std::string, std::string>> properties)
 {
@@ -761,58 +797,108 @@ uint32_t CSpxSynthesizer::Write(ISpxTtsEngineAdapter*, const std::string& reques
         m_resultProperties = properties;
     }
 
+    // If this requestId already had its init attempt fail (and there was a
+    // SynthesisCanceled event fired), drain remaining audio chunks silently
+    // until the natural end of the turn.
+    if (!m_writeInitFailureReportedForRequest.empty()
+        && m_writeInitFailureReportedForRequest == requestId)
+    {
+        return size;
+    }
+
     if (m_audioOfCurrentTurn == nullptr)
     {
-        m_needDecoding = (m_adapterFormat->wFormatTag != m_format->outputFormat->wFormatTag ||
-            m_adapterFormat->nSamplesPerSec != m_format->outputFormat->nSamplesPerSec);
-        m_audioOfCurrentTurn = SpxCreateObjectWithSite<ISpxAudioOutput>("CSpxPullAudioOutputStream", GetSite());
-        string codecAdapterClassName;
-    #ifdef __ANDROID__
-        codecAdapterClassName = "CSpxAndroidCodecAdapter";
-    #elif defined(__APPLE__)
-        codecAdapterClassName = "CSpxAppleCodecAdapter";
-    #else
-        codecAdapterClassName = "CSpxCodecAdapter";
-    #endif
-        if (m_needDecoding)
+        // Construct all fallible state into locals first. m_audioOfCurrentTurn
+        // is the "init done" guard for subsequent Write() calls and MUST NOT
+        // be published until m_codecBuffer / m_codecAdapter have been assigned.
+        // Otherwise, if any step below throws (SPXERR_GSTREAMER_NOT_FOUND_ERROR
+        // or any future exceptions added to this block), the next Write() call
+        // would skip this block, take the m_needDecoding branch, and dereference
+        // a null m_codecBuffer.
+        const bool needDecoding =
+            (m_adapterFormat->wFormatTag != m_format->outputFormat->wFormatTag ||
+             m_adapterFormat->nSamplesPerSec != m_format->outputFormat->nSamplesPerSec);
+
+        std::shared_ptr<ISpxAudioOutput>       audioOfCurrentTurn;
+        std::shared_ptr<ISpxAudioStreamReader> codecAdapter;
+        std::shared_ptr<ISpxAudioOutput>       codecBuffer;
+
+        try
         {
-            m_codecAdapter = SpxCreateObjectWithSite<ISpxAudioStreamReader>(codecAdapterClassName.c_str(), GetSite());
-            SPX_THROW_HR_IF(SPXERR_GSTREAMER_NOT_FOUND_ERROR, m_codecAdapter == nullptr);
+            audioOfCurrentTurn = SpxCreateObjectWithSite<ISpxAudioOutput>("CSpxPullAudioOutputStream", GetSite());
 
-            m_decodingDone = false;
+            string codecAdapterClassName;
+        #ifdef __ANDROID__
+            codecAdapterClassName = "CSpxAndroidCodecAdapter";
+        #elif defined(__APPLE__)
+            codecAdapterClassName = "CSpxAppleCodecAdapter";
+        #else
+            codecAdapterClassName = "CSpxCodecAdapter";
+        #endif
+            if (needDecoding)
+            {
+                codecAdapter = SpxCreateObjectWithSite<ISpxAudioStreamReader>(codecAdapterClassName.c_str(), GetSite());
+                SPX_THROW_HR_IF(SPXERR_GSTREAMER_NOT_FOUND_ERROR, codecAdapter == nullptr);
 
-            m_codecBuffer = SpxCreateObjectWithSite<ISpxAudioOutput>("CSpxPullAudioOutputStream", GetSite());
-            const auto reader = SpxQueryInterface<ISpxAudioOutputReader>(m_codecBuffer);
+                codecBuffer = SpxCreateObjectWithSite<ISpxAudioOutput>("CSpxPullAudioOutputStream", GetSite());
+                const auto reader = SpxQueryInterface<ISpxAudioOutputReader>(codecBuffer);
 
-            auto initCallbacks = SpxQueryInterface<ISpxAudioStreamReaderInitCallbacks>(m_codecAdapter);
-            initCallbacks->SetCallbacks(
-                [reader](uint8_t* _buffer, uint32_t _size) { return reader->Read(_buffer, _size); },
-                []() {  });
+                auto initCallbacks = SpxQueryInterface<ISpxAudioStreamReaderInitCallbacks>(codecAdapter);
+                initCallbacks->SetCallbacks(
+                    [reader](uint8_t* _buffer, uint32_t _size) { return reader->Read(_buffer, _size); },
+                    []() {  });
 
-            initCallbacks->SetPropertyCallback2(
-                [this](PropertyId propertyId)
-                { return this->GetOr(propertyId, ""); });
+                initCallbacks->SetPropertyCallback2(
+                    [this](PropertyId propertyId)
+                    { return this->GetOr(propertyId, ""); });
 
-            auto writerInitCallbacks = SpxQueryInterface<ISpxAudioStreamWriterInitCallbacks>(m_codecAdapter);
-            writerInitCallbacks->SetWriterCallbacks(
-                [this, requestId](const uint8_t* _buffer, uint32_t _size) {
-                    return this->WriteToOutput(_buffer, _size, requestId); },
-                [this]() { this->m_decodingDone = true; });
+                auto writerInitCallbacks = SpxQueryInterface<ISpxAudioStreamWriterInitCallbacks>(codecAdapter);
+                writerInitCallbacks->SetWriterCallbacks(
+                    [this, requestId](const uint8_t* _buffer, uint32_t _size) {
+                        return this->WriteToOutput(_buffer, _size, requestId); },
+                    [this]() { this->m_decodingDone = true; });
 
-            auto adapterAsCodec = SpxQueryInterface<ISpxAudioCodecAdapter>(m_codecAdapter);
-            adapterAsCodec->EnableThrottling(GetOr<bool>("SPEECH-SynthThrottleDecoding", false));
-            adapterAsCodec->SetSourceFormat(m_adapterFormat.get());
+                auto adapterAsCodec = SpxQueryInterface<ISpxAudioCodecAdapter>(codecAdapter);
+                adapterAsCodec->EnableThrottling(GetOr<bool>("SPEECH-SynthThrottleDecoding", false));
+                adapterAsCodec->SetSourceFormat(m_adapterFormat.get());
 
-            auto adapterAsSetFormat = SpxQueryInterface<ISpxAudioStreamInitFormat>(m_codecAdapter);
-            const auto decoderFormat = SpxCopyWAVEFORMATEX(m_adapterFormat);
-            decoderFormat->nChannels = m_format->outputFormat->nChannels;
-            decoderFormat->wBitsPerSample = m_format->outputFormat->wBitsPerSample;
-            decoderFormat->nSamplesPerSec = m_format->outputFormat->nSamplesPerSec;
-            adapterAsSetFormat->SetFormat(decoderFormat.get());
-            // trigger decoding start
-            m_codecAdapter->Read(nullptr, 0);
-            m_decodingStartedTime = PAL::GetMillisecondsSinceEpoch();
+                auto adapterAsSetFormat = SpxQueryInterface<ISpxAudioStreamInitFormat>(codecAdapter);
+                const auto decoderFormat = SpxCopyWAVEFORMATEX(m_adapterFormat);
+                decoderFormat->nChannels = m_format->outputFormat->nChannels;
+                decoderFormat->wBitsPerSample = m_format->outputFormat->wBitsPerSample;
+                decoderFormat->nSamplesPerSec = m_format->outputFormat->nSamplesPerSec;
+                adapterAsSetFormat->SetFormat(decoderFormat.get());
+
+                m_decodingDone = false;
+                // trigger decoding start
+                codecAdapter->Read(nullptr, 0);
+                m_decodingStartedTime = PAL::GetMillisecondsSinceEpoch();
+            }
         }
+        catch (const ExceptionWithCallStack& e)
+        {
+            const std::string details = e.what();
+            SPX_TRACE_ERROR("%s: Write() init failed: hr=0x%x %s", __FUNCTION__, (unsigned)e.GetErrorCode(), details.c_str());
+            RecordWriteInitFailure(requestId,
+                ErrorInfo::FromExplicitError(CancellationErrorCode::RuntimeError, details));
+            return size;
+        }
+        catch (const std::exception& e)
+        {
+            const std::string details = e.what();
+            SPX_TRACE_ERROR("%s: Write() init failed: %s", __FUNCTION__, details.c_str());
+            RecordWriteInitFailure(requestId,
+                ErrorInfo::FromExplicitError(CancellationErrorCode::RuntimeError, details));
+            return size;
+        }
+
+        // All fallible construction succeeded. Publish the state atomically
+        //-enough for subsequent Write() calls: assign dependent members
+        // first, then flip the guard last.
+        m_codecAdapter       = std::move(codecAdapter);
+        m_codecBuffer        = std::move(codecBuffer);
+        m_needDecoding       = needDecoding;
+        m_audioOfCurrentTurn = std::move(audioOfCurrentTurn);   // guard LAST
     }
 
     if (buffer == nullptr || size <= 0)

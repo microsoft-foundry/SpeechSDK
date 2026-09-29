@@ -77,6 +77,11 @@ SPXAPI result_get_result_id(SPXRESULTHANDLE hresult, char* pszResultId, uint32_t
 SPXAPI result_get_text(SPXRESULTHANDLE hresult, char* pszText, uint32_t cchText);
 SPXAPI result_get_offset(SPXRESULTHANDLE hresult, uint64_t* offset);
 SPXAPI result_get_duration(SPXRESULTHANDLE hresult, uint64_t* duration);
+
+// Inline commit: commit token that this result acknowledges, or 0 if the
+// result is not a commit acknowledgment.
+SPXAPI result_get_commit_token(SPXRESULTHANDLE hresult, uint32_t* commitToken);
+
 SPXAPI result_get_channel(SPXRESULTHANDLE hresult, uint32_t* channel);
 
 SPXAPI result_get_property_bag(SPXRESULTHANDLE hresult, SPXPROPERTYBAGHANDLE* hpropbag);

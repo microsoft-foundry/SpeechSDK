@@ -77,6 +77,7 @@ public:
     void SendSpeechEventMessage(std::string&& msg) override;
     void SendNetworkMessage(const char* path, std::string&& msg, const std::shared_ptr<std::promise<bool>>& pr) override;
     void SendNetworkMessage(const char* path, std::vector<uint8_t>&& msg, const std::shared_ptr<std::promise<bool>>& pr) override;
+    void SendCommit(uint32_t token, bool hasChannel, uint32_t channelId) override;
 
     // --- ISpxAudioProcessor
     void SetFormat(const SPXWAVEFORMATEX* pformat) override;
@@ -173,8 +174,10 @@ private:
 
     std::string GetSpeechContextJson();
     bool IsUnifiedEndpoint();
+    bool IsConversationMode();
     void AddModeJsonToContext(ajv::JsonBuilder& contextJson);
     void AddLanguageJsonToContext(ajv::JsonBuilder& contextJson);
+    void AddModelJsonToContext(ajv::JsonBuilder& contextJson);
     void AddDgiJsonToContext(ajv::JsonBuilder& contextJson);
     void AddKeywordDetectionJsonToContext(ajv::JsonBuilder& contextJson);
     void AddLeftRightJsonToContext(ajv::JsonBuilder& contextJson);

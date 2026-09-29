@@ -141,6 +141,30 @@ SPXAPI push_audio_input_stream_close(SPXAUDIOSTREAMHANDLE haudioStream)
     SPXAPI_CATCH_AND_RETURN_HR(hr);
 }
 
+SPXAPI push_audio_input_stream_commit(SPXAUDIOSTREAMHANDLE haudioStream, uint32_t* pToken)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, pToken == nullptr);
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto stream = CSpxSharedPtrHandleTableManager::GetPtr<ISpxAudioStream, SPXAUDIOSTREAMHANDLE>(haudioStream);
+        auto pushStream = SpxQueryInterface<ISpxAudioStreamWriter>(stream);
+        *pToken = pushStream->Commit();
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
+SPXAPI push_audio_input_stream_commit_channel(SPXAUDIOSTREAMHANDLE haudioStream, uint32_t channelId, uint32_t* pToken)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, pToken == nullptr);
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto stream = CSpxSharedPtrHandleTableManager::GetPtr<ISpxAudioStream, SPXAUDIOSTREAMHANDLE>(haudioStream);
+        auto pushStream = SpxQueryInterface<ISpxAudioStreamWriter>(stream);
+        *pToken = pushStream->Commit(channelId);
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
 SPXAPI pull_audio_output_stream_read(SPXAUDIOSTREAMHANDLE haudioStream, uint8_t* buffer, uint32_t bufferSize, uint32_t* pfilledSize)
 {
     SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, pfilledSize == nullptr);

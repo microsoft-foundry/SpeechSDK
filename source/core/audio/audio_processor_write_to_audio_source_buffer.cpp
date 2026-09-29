@@ -6,6 +6,7 @@
 //
 
 #include "stdafx.h"
+#include <inttypes.h>
 #include "audio_processor_write_to_audio_source_buffer.h"
 #include "service_helpers.h"
 #include <property_id_2_name_map.h>
@@ -56,6 +57,30 @@ void CSpxAudioProcessorWriteToAudioSourceBuffer::ProcessAudio(const DataChunkPtr
 
     m_bufferData->Write(audioChunk->data.get(), audioChunk->size);
     NotifyTarget();
+}
+
+void CSpxAudioProcessorWriteToAudioSourceBuffer::ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId)
+{
+    // Inline commit: audio reaches the session indirectly - ProcessAudio
+    // above writes bytes into the audio-source buffer and notifies the
+    // shim, which reads them back and calls ProcessAudio on the session.
+    // A commit marker carries no bytes, so it cannot ride that buffer.
+    // Forward it to the shim, which hands it to the session's audio
+    // processor.
+    //
+    // Ordering is preserved: the notify chain in ProcessAudio runs
+    // synchronously on the pump thread, so by the time the pump calls
+    // ProcessCommit, every preceding audio chunk has already been
+    // delivered to the session.
+    auto shim = SpxQueryService<ISpxAudioSessionShim>(GetSite());
+    if (shim == nullptr)
+    {
+        SPX_TRACE_ERROR("%s: no audio session shim reachable; dropping commit token=%" PRIu32, __FUNCTION__, token);
+        return;
+    }
+
+    SPX_DBG_TRACE_VERBOSE("%s: forwarding commit token=%" PRIu32 " offsetBytes=%" PRIu64, __FUNCTION__, token, offsetBytes);
+    shim->ProcessCommit(token, offsetBytes, hasChannel, channelId);
 }
 
 void CSpxAudioProcessorWriteToAudioSourceBuffer::SetError(const std::string&)

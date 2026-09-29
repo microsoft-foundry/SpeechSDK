@@ -165,7 +165,13 @@ SPXAPI speech_config_from_endpoint(SPXSPEECHCONFIGHANDLE * hconfig, const char* 
 SPXAPI speech_config_from_host(SPXSPEECHCONFIGHANDLE* hconfig, const char* host, const char* subscription);
 SPXAPI speech_config_release(SPXSPEECHCONFIGHANDLE hconfig);
 SPXAPI speech_config_get_property_bag(SPXSPEECHCONFIGHANDLE hconfig, SPXPROPERTYBAGHANDLE* hpropbag);
+/**
+ * Sets the model to use for speech recognition.
+ *
+ * @param hconfig The speech config handle.
+ * @param model The model name. An empty string clears the configured model. The pointer must not be null.
+ */
+SPXAPI speech_config_set_model(SPXSPEECHCONFIGHANDLE hconfig, const char* model);
 SPXAPI speech_config_set_audio_output_format(SPXSPEECHCONFIGHANDLE hconfig, Speech_Synthesis_Output_Format formatId);
 SPXAPI speech_config_set_service_property(SPXSPEECHCONFIGHANDLE configHandle, const char* propertyName, const char* propertyValue, SpeechConfig_ServicePropertyChannel channel);
 SPXAPI speech_config_set_profanity(SPXSPEECHCONFIGHANDLE configHandle, SpeechConfig_ProfanityOption profanity);
-

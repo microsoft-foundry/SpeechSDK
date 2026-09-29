@@ -453,6 +453,7 @@ protected:
                 GetPropertyName(PropertyId::SpeechServiceConnection_SynthModelKey),
                 GetPropertyName(PropertyId::SpeechTranslation_ModelKey),
                 GetPropertyName(PropertyId::KeywordRecognition_ModelKey),
+                GetPropertyName(PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelLicense),
                 "service.auth.key",
                 "service.auth.token",
                 "embedded.ocrmodelkey",

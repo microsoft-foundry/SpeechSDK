@@ -353,6 +353,17 @@ void CSpxAudioStreamSession::InitFromStream(std::shared_ptr<ISpxAudioStream> str
         // Attach the stream to the pump
         QueryAndInvokeMember<ISpxAudioSourceInit>(m_audioShim, &ISpxAudioSourceInit::InitFromStream, streamToUse);
 
+        // Inline commit: remember the reader so its commit-anchor baseline can
+        // be re-based when the audio buffer is created. Only the direct case is
+        // recorded: when a codec adapter is interposed, streamToUse is the
+        // adapter rather than the push stream, and commit is rejected at the
+        // API for every format that routes that way, so there is no anchor to
+        // keep aligned.
+        if (!m_codecAdapter)
+        {
+            m_commitAnchorReader = SpxQueryInterface<ISpxAudioStreamReader>(streamToUse);
+        }
+
         Set(PropertyId::AudioConfig_AudioSource, g_audioSourceStream);
         SetAudioConfigurationInProperties();
         m_isReliableDelivery = true;
@@ -569,6 +580,111 @@ void CSpxAudioStreamSession::ProcessAudio(const DataChunkPtr& audioChunk)
     m_threadService->ExecuteAsync(std::move(task));
 }
 
+void CSpxAudioStreamSession::ResetStreamCommitAnchorBase()
+{
+    // Inline commit: tell the push stream to express commit anchors relative to
+    // this session's audio buffer, which has just been created and therefore
+    // starts counting from zero. See the call site in StartAudioPump for why
+    // this is tied to buffer creation rather than to pump start.
+    //
+    // Null for microphone, file and pull-stream input, and for any input that
+    // goes through a codec - none of which support inline commit - so the
+    // absence of a reader here is the ordinary case rather than a failure.
+    auto reader = m_commitAnchorReader.lock();
+    if (reader == nullptr)
+    {
+        return;
+    }
+
+    reader->ResetCommitAnchorBase();
+}
+
+void CSpxAudioStreamSession::ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId)
+{
+    // Inline commit: post to the ThreadService Background worker to append the
+    // unacknowledged-commit entry and hand the request to the reco adapter. Ordering
+    // with the audio pipeline is preserved because ProcessCommit is called from
+    // the same pump loop that delivered the audio ProcessAudio calls that
+    // precede it. Channel scope
+    // (hasChannel, channelId) is forwarded to SendCommit for the outbound
+    // X-Client-Commit-Channel-Index header.
+    //
+    // The anchor is stored in bytes exactly as the push stream recorded it. It
+    // is never converted to ticks: the only thing it is ever compared against
+    // is m_sentAudioOffsetBytes, which counts the same bytes.
+    SPX_DBG_TRACE_VERBOSE("%s: token=%" PRIu32 " offsetBytes=%" PRIu64,
+        __FUNCTION__, token, offsetBytes);
+
+    std::shared_ptr<ISpxRecoEngineAdapter> recoAdapter = m_recoAdapter;
+    auto task = CreateTask([this, keepAliveAdapter = recoAdapter, token, offsetBytes, hasChannel, channelId]()
+    {
+        // Inline commit: if the unacknowledged-commits FIFO is at the cap,
+        // discard the new marker silently (log-only) and do not send. The
+        // token has already been returned to the app by Commit(); it will
+        // never produce a Recognized with CommitToken != 0 - same failure
+        // mode as a service that does not support commit.
+        if (m_unacknowledgedCommits.size() >= kMaxUnacknowledgedCommits)
+        {
+            SPX_TRACE_ERROR("%s: unacknowledged-commits FIFO at cap (%zu); discarding new marker for token=%" PRIu32,
+                __FUNCTION__, kMaxUnacknowledgedCommits, token);
+            return;
+        }
+
+        m_unacknowledgedCommits.push_back({ token, offsetBytes, hasChannel, channelId });
+
+        // Audio anchoring at the moment of sending: a commit
+        // recorded at position N is delivered after all audio before N. The
+        // pump drains a marker only once the audio ahead of it has been
+        // forwarded, and both hops run in order on the same background worker,
+        // so the anchor can never be ahead of the audio handed to the adapter.
+        //
+        // Two distinct defects would break this, and both would otherwise be
+        // silent - the commit would simply land at the wrong point in the
+        // audio, with no error and no failed test:
+        //
+        //  - A byte-domain mismatch between the anchor and the sent-audio
+        //    count, as happens if a reused push stream is not re-based onto
+        //    this session's baseline (see ResetStreamCommitAnchorBase).
+        //  - A commit sent while ProcessNextAudio is holding audio back, which
+        //    it does when the adapter has muted audio or the session is paused
+        //    or stopping. Those paths do not currently deliver commits, but
+        //    nothing here enforces that.
+        //
+        // This is checked rather than gated. Deferring the send would need a
+        // later drain point to defer to, and the states that hold audio back
+        // either coincide with the pump going idle (the single-shot mute, and
+        // StoppingPump) or belong to KWS/VAD hot-swap, which is out of scope
+        // for inline commit. In those states a deferred commit would never be
+        // drained at all, so gating would turn "sent slightly early" into
+        // "never sent" - a worse outcome than the one it set out to prevent,
+        // and it would consume FIFO slots against kMaxUnacknowledgedCommits
+        // while doing so.
+        SPX_DBG_ASSERT_WITH_MESSAGE(offsetBytes <= m_sentAudioOffsetBytes,
+            "Inline commit: commit anchor is ahead of the audio sent on this connection; "
+            "the commit would be delivered before audio written before it.");
+
+        // The same condition in release builds, where the assertion above is
+        // compiled out. Log-only and non-fatal, consistent with every other
+        // commit-path anomaly: the boundary may be misplaced, but audio and
+        // recognition are unaffected.
+        SPX_TRACE_WARNING_IF(offsetBytes > m_sentAudioOffsetBytes,
+            "%s: commit token=%" PRIu32 " anchored at %" PRIu64 " bytes is ahead of the %" PRIu64 " bytes sent on this connection; the requested boundary may fall short of the audio written before it",
+            __FUNCTION__, token, offsetBytes, m_sentAudioOffsetBytes);
+
+        if (keepAliveAdapter != nullptr)
+        {
+            SPX_DBG_TRACE_VERBOSE("%s: handing commit token=%" PRIu32 " to reco adapter", __FUNCTION__, token);
+            keepAliveAdapter->SendCommit(token, hasChannel, channelId);
+        }
+        else
+        {
+            SPX_TRACE_ERROR("%s: no reco adapter; commit token=%" PRIu32 " will never be sent", __FUNCTION__, token);
+        }
+    });
+
+    m_threadService->ExecuteAsync(std::move(task));
+}
+
 void CSpxAudioStreamSession::SlowDownThreadIfNecessary(uint32_t dataSize, std::chrono::milliseconds nonAcknowledgedSizeInMsec)
 {
     m_bytesTransited += dataSize;
@@ -631,7 +747,73 @@ bool CSpxAudioStreamSession::ProcessNextAudio()
                 }
             }
 
+            // Inline commit: an unacknowledged commit whose recorded offset is at or
+            // before the audio already sent on this connection belongs *before*
+            // this chunk, not after it.
+            //
+            // On the first call after a rewind, m_sentAudioOffsetBytes is the
+            // audio continuation offset, so commits sitting exactly at the
+            // replay start go out ahead of any replayed audio - the service
+            // then has nothing outstanding and answers with an acknowledgment
+            // carrying no content. On subsequent calls each remaining commit is
+            // emitted once the audio up to its offset has been re-sent.
+            //
+            // Emitting before ProcessAudio is what preserves the original
+            // relative order: a commit that preceded a given chunk before the
+            // disconnect must precede it again on the new connection.
+            //
+            // In normal operation needsResend is false on every entry, so this
+            // is a no-op.
+            //
+            // Draining is idempotent: emission clears needsResend, so a commit
+            // is sent at most once per rewind however often this runs.
+            auto drainResendableCommits = [&]()
+            {
+                if (m_recoAdapter == nullptr)
+                {
+                    return;
+                }
+
+                for (auto& entry : m_unacknowledgedCommits)
+                {
+                    if (entry.needsResend && entry.offsetBytes <= m_sentAudioOffsetBytes)
+                    {
+                        SPX_DBG_TRACE_VERBOSE("[%p]CSpxAudioStreamSession::ProcessNextAudio: re-emit commit token=%" PRIu32 " at offsetBytes=%" PRIu64 " (audio sent up to %" PRIu64 " bytes, replay started at %" PRIu64 " bytes)",
+                            (void*)this, entry.token, entry.offsetBytes, m_sentAudioOffsetBytes, m_currentTurnGlobalOffsetBytes);
+                        m_recoAdapter->SendCommit(entry.token, entry.hasChannel, entry.channelId);
+                        entry.needsResend = false;
+                    }
+                }
+            };
+
+            drainResendableCommits();
+
             processor->ProcessAudio(item);
+
+            // Track how much audio has been handed to the adapter on this
+            // connection. Re-emitted commits are placed against this, not
+            // against the audio buffer's absolute offset: the latter tracks
+            // service-confirmed audio and does not advance during replay.
+            //
+            // Counted in the same unit the commit anchor is recorded in
+            // (bytes), so the comparison above is exact. Adding chunk sizes
+            // involves no rounding, so this cannot drift from the push
+            // stream's own byte count however many chunks are sent.
+            m_sentAudioOffsetBytes += static_cast<uint64_t>(item->size);
+
+            // Drain again now that the sent-audio offset has advanced.
+            //
+            // A commit whose offset falls exactly at the end of this chunk only
+            // becomes eligible once the increment above has run, so the drain
+            // before ProcessAudio cannot have emitted it. Without this second
+            // call it would wait for a later chunk to carry it out, and if this
+            // is the last chunk of the replay - no more audio follows - there is
+            // no later chunk and the commit is never re-emitted at all.
+            //
+            // Placement after the increment is what makes the boundary case
+            // work; placement after ProcessAudio keeps the ordering guarantee
+            // intact, since the commit belongs after the audio it closes.
+            drainResendableCommits();
 
             if (speechProcessor)
             {
@@ -1448,6 +1630,24 @@ void CSpxAudioStreamSession::EnsureFireSessionStopped()
         EnsureFireResultEvent();
     }
 
+    // Inline commit: any commit tokens still unacknowledged at
+    // session stop are discarded, each recorded in the log. No app-visible
+    // per-token event fires. Recognition is ending anyway;
+    // the session's own SessionStopped / Canceled events (if applicable)
+    // fire per existing SDK behaviour, unrelated to individual commit
+    // tokens.
+    //
+    // Warning rather than error severity: an unacknowledged commit at teardown
+    // can happen, is not a fault, and a service without commit support produces
+    // one line per issued token.
+    while (!m_unacknowledgedCommits.empty())
+    {
+        const auto entry = m_unacknowledgedCommits.front();
+        SPX_TRACE_WARNING("%s: commit token=%" PRIu32 " unacknowledged at session teardown: no ACK received",
+            __FUNCTION__, entry.token);
+        m_unacknowledgedCommits.pop_front();
+    }
+
     FireEvent(EventType::SessionStop, nullptr, sessionIdOverride.empty() ? nullptr : sessionIdOverride.c_str());
 }
 
@@ -1536,6 +1736,52 @@ void CSpxAudioStreamSession::EnsureFireResultEvent()
         WaitForRecognition_Complete(result);
         m_fireEndOfStreamAtSessionStop = false;
     }
+}
+
+void CSpxAudioStreamSession::AdapterCommitAcknowledged(ISpxRecoEngineAdapter* /* adapter */, uint32_t token, uint64_t offset, uint64_t duration)
+{
+    // Inline commit: a speech.phrase carrying
+    // clientAudioMetadata["X-Client-Commit-Token"] has arrived. Apply the
+    // walk-and-discard-then-match algorithm:
+    //   1. Walk m_unacknowledgedCommits from head; for each entry with
+    //      commit_token < ack_token, discard it with a log line.
+    //   2. Locate the entry matching ack_token:
+    //      - If found: remove it. Bookkeeping complete.
+    //      - If not found: log at debug/verbose (expected for the 2nd..Nth
+    //        ACK of a multichannel commit).
+    // Recognition is not stopped in any of these cases.
+    //
+    // NOTE: the Recognized event carrying the CommitToken is fired
+    // unconditionally by the adapter's OnSpeechPhrase path;
+    // this method's job is FIFO bookkeeping only. The Recognized
+    // event fires whether or not the FIFO holds a matching entry.
+    UNUSED(offset);
+    UNUSED(duration);
+
+    // Discard older tokens: pop entries whose token is
+    // smaller than the ACK'd token. Because the service processes
+    // commits in receive order, those older tokens are known-dead.
+    //
+    // Warning rather than error severity: this is the expected consequence of
+    // a commit the service chose not to acknowledge, not a fault in the SDK.
+    while (!m_unacknowledgedCommits.empty() && m_unacknowledgedCommits.front().token < token)
+    {
+        const auto discarded = m_unacknowledgedCommits.front();
+        SPX_TRACE_WARNING("%s: discarding older unacknowledged commit token=%" PRIu32 " (ACK arrived for later token %" PRIu32 ")",
+            __FUNCTION__, discarded.token, token);
+        m_unacknowledgedCommits.pop_front();
+    }
+
+    // Match by head: after discarding older entries, the head should be
+    // the ACK'd token if it was still unacknowledged.
+    if (m_unacknowledgedCommits.empty() || m_unacknowledgedCommits.front().token != token)
+    {
+        SPX_DBG_TRACE_VERBOSE("%s: no unacknowledged commit matches ACK token=%" PRIu32 " (expected for 2nd..Nth multichannel ACK)", __FUNCTION__, token);
+        return;
+    }
+
+    m_unacknowledgedCommits.pop_front();
+    SPX_DBG_TRACE_VERBOSE("%s: matched token=%" PRIu32, __FUNCTION__, token);
 }
 
 void CSpxAudioStreamSession::FireResultEvent(const std::wstring& sessionId, std::shared_ptr<ISpxRecognitionResult> result)
@@ -1908,6 +2154,54 @@ void CSpxAudioStreamSession::AdapterStoppedTurn(ISpxRecoEngineAdapter* /* adapte
         }
         m_currentTurnGlobalOffset = m_audioBuffer->GetAbsoluteOffset();
         bufferedBytes = m_audioBuffer->StashedSizeInBytes();
+
+        // Inline commit: decide the fate of each unacknowledged commit against the
+        // point replay will resume from - the audio continuation offset, which
+        // is also what the service is told in speech.context. Let X be the
+        // commit's recorded offset and Y that continuation offset.
+        //
+        //   X <  Y  the service already processed and acknowledged audio past
+        //           the commit point, so the boundary it asked for has already
+        //           happened and been reported. The commit is obsolete;
+        //           re-emitting it would signal a boundary that is in the past
+        //           and out of order with the replayed audio. Discard it.
+        //
+        //   X == Y  audio was processed exactly up to the commit point. The
+        //           commit is still valid, and none of the audio it refers to
+        //           will be replayed, so it must be sent before any replayed
+        //           audio. The service then has nothing outstanding and answers
+        //           with an acknowledgment carrying no content.
+        //
+        //   X >  Y  the commit falls inside the audio about to be replayed. It
+        //           must be sent once exactly that much audio has been re-sent,
+        //           which ProcessNextAudio handles against m_sentAudioOffsetBytes.
+        //
+        // Both X and Y are in bytes here. Y is taken from GetCurrentOffset(),
+        // the audio buffer's byte-domain frontier, rather than by converting
+        // m_currentTurnGlobalOffset: that field is shared with non-commit turn
+        // management (it feeds the "no progress in the last turn" audio-drop
+        // decision below) and is deliberately left in ticks.
+        //
+        // Whether the service acknowledges a re-emitted commit is its own
+        // business - an endpoint without inline commit support will not - but
+        // the ordering of what is sent is the SDK's responsibility.
+        m_currentTurnGlobalOffsetBytes = m_audioBuffer->GetCurrentOffset();
+        m_sentAudioOffsetBytes = m_currentTurnGlobalOffsetBytes;
+
+        for (auto it = m_unacknowledgedCommits.begin(); it != m_unacknowledgedCommits.end(); )
+        {
+            if (it->offsetBytes < m_currentTurnGlobalOffsetBytes)
+            {
+                SPX_DBG_TRACE_WARNING("[%p]CSpxAudioStreamSession::AdapterStoppedTurn: discarding commit token=%u at offsetBytes=%" PRIu64 ": audio past it was already acknowledged (continuation offset %" PRIu64 " bytes)",
+                    (void*)this, it->token, it->offsetBytes, m_currentTurnGlobalOffsetBytes);
+                it = m_unacknowledgedCommits.erase(it);
+            }
+            else
+            {
+                it->needsResend = true;
+                ++it;
+            }
+        }
     }
     SPX_DBG_TRACE_VERBOSE("[%p]CSpxAudioStreamSession::AdapterStoppedTurn: m_currentTurnGlobalOffset=%" PRIu64 ", previousTurnGlobalOffset=%" PRIu64 " bufferedBytes=%" PRIu64, (void*)this, m_currentTurnGlobalOffset, previousTurnGlobalOffset, bufferedBytes);
 
@@ -3052,6 +3346,27 @@ void CSpxAudioStreamSession::StartAudioPump(RecognitionKind startKind, std::shar
             SetThrottleVariables(format.get());
 
             m_audioBuffer = std::make_shared<PcmAudioBuffer>(*format);
+
+            // Inline commit: the audio buffer's absolute offset is the baseline
+            // every commit anchor is ultimately compared against - directly in
+            // the obsolete-commit walk in AdapterStoppedTurn, and indirectly
+            // through m_sentAudioOffsetBytes, which is seeded from it. A fresh
+            // PcmAudioBuffer starts that count at zero, so the stream feeding
+            // it must start stamping anchors from zero at the same moment.
+            //
+            // This is deliberately inside the "buffer does not exist yet"
+            // branch rather than on every pump start. The buffer survives
+            // stop/restart on the same recognizer, and its offset keeps
+            // accumulating across those restarts; re-basing the stream there
+            // too would reintroduce exactly the divergence this prevents, in
+            // the opposite direction. Creating the buffer is the one event that
+            // resets the baseline, so it is the one event that re-bases.
+            //
+            // Without this, a stream reused by a second recognizer stamps
+            // anchors inflated by everything the first recognizer consumed, and
+            // both reconnect comparisons stop matching: obsolete commits are
+            // never discarded, and pending commits are never re-emitted.
+            ResetStreamCommitAnchorBase();
         }
         m_audioBuffer->NewTurn();
         m_currentTurnGlobalOffset = m_audioBuffer->GetAbsoluteOffset();

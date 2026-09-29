@@ -87,5 +87,13 @@ public:
         InvokeOnDelegate(C::GetDelegate(), &I::ProcessAudio, audioChunk);
     }
 
+    // Inline commit: forward the outbound audio.commit request to the
+    // wrapped adapter. Without this, a wrapper (offset-fixup, retry)
+    // inherits ISpxRecoEngineAdapter's default no-op SendCommit and the
+    // commit is silently dropped before it reaches the USP adapter.
+    void DelegateSendCommit(uint32_t token, bool hasChannel, uint32_t channelId)
+    {
+        InvokeOnDelegate(C::GetDelegate(), &I::SendCommit, token, hasChannel, channelId);
+    }
 };
 }}}} // Microsoft::CognitiveServices::Speech::Impl

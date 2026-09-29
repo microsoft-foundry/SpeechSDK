@@ -12,6 +12,7 @@
 #include "site_helpers.h"
 #include "speechapi_cxx_audio_processing_options.h"
 
+using namespace Microsoft::CognitiveServices::Speech;
 using namespace Microsoft::CognitiveServices::Speech::Audio;
 using namespace Microsoft::CognitiveServices::Speech::Impl;
 
@@ -261,6 +262,24 @@ SPXAPI audio_processing_options_set_speaker_signature(SPXAUDIOPROCESSINGOPTIONSH
         auto options = SpxGetPtrFromHandle<ISpxAudioProcessingOptions>(hoptions);
         std::vector<float> signature(speakerSignature, speakerSignature + length);
         options->SetSpeakerSignature(signature);
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
+SPXAPI audio_processing_options_set_personalized_noise_suppression_model(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, const char* modelPath, const char* license)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, !audio_processing_options_is_handle_valid(hoptions));
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, modelPath == nullptr || !(*modelPath));
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, license == nullptr || !(*license));
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto options = SpxGetPtrFromHandle<ISpxAudioProcessingOptions>(hoptions);
+        auto namedProperties = SpxQueryInterface<ISpxNamedProperties>(options);
+
+        // Set together so the path and the license it was issued under cannot drift apart.
+        namedProperties->Set(PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelPath, modelPath);
+        namedProperties->Set(PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelLicense, license);
     }
     SPXAPI_CATCH_AND_RETURN_HR(hr);
 }

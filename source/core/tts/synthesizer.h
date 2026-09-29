@@ -155,6 +155,11 @@ protected:
 private:
     uint32_t WriteToOutput(const uint8_t *buffer, uint32_t size, const std::string &requestId);
 
+    // Record a per-turn Write() init failure.
+    void RecordWriteInitFailure(
+        const std::string& requestId,
+        const std::shared_ptr<ISpxErrorInformation>& error);
+
     void PushRequestIntoQueue(const std::string requestId);
 
     /// <summary>
@@ -256,6 +261,18 @@ private:
     SpxWAVEFORMATEX_Type m_adapterFormat;
     bool m_needDecoding = false;
     bool m_isUsp = false;
+
+    // Per-turn "already reported" gate for CSpxSynthesizer::Write() init
+    // failures like SPXERR_GSTREAMER_NOT_FOUND_ERROR when the compressed
+    // audio transmission property is set but GStreamer is not installed.
+    std::string m_writeInitFailureReportedForRequest;
+
+    // Per-turn Write() init error. Set by RecordWriteInitFailure() when
+    // the codec-adapter init block throws. Cleared at the end of each turn
+    // so that a subsequent Speak* call on the same synthesizer gets a fresh
+    // init attempt.
+    std::shared_ptr<ISpxErrorInformation> m_pendingWriteInitError;
+
     uint64_t m_synthesisResultAudioDuration = 0;
 
     int64_t m_synthesisStartedTime{-1};

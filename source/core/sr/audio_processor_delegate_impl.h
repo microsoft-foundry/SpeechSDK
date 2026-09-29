@@ -31,6 +31,13 @@ public:
     {
         D::DelegateProcessAudio(audioChunk);
     }
+
+    // Inline commit: forward the commit marker on to the wrapped processor,
+    // so a pass-through processor does not silently drop it.
+    void ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId) override
+    {
+        D::DelegateProcessCommit(token, offsetBytes, hasChannel, channelId);
+    }
 };
 
 } } } } // Microsoft::CognitiveServices::Speech::Impl

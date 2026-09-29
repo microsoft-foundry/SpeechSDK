@@ -190,6 +190,31 @@ void CSpxUspRecoEngineAdapter::SendSpeechEventMessage(std::string&& message)
     UspSendMessage("speech.event", message, USP::MessageType::SpeechEvent);
 }
 
+void CSpxUspRecoEngineAdapter::SendCommit(uint32_t token, bool hasChannel, uint32_t channelId)
+{
+    // Inline commit: send an audio.commit as a headers-only text message,
+    // with X-Client-Commit-Token carrying the token as a decimal string,
+    // and an optional X-Client-Commit-Channel-Index header carrying the
+    // 0-indexed channel scope. Absence of the
+    // channel-index header means "apply to all channels".
+    EnsureUspInit();
+
+    if (m_uspConnection == nullptr || IsBadState())
+    {
+        SPX_TRACE_ERROR("%s: no USP connection or bad state; dropping audio.commit for token %" PRIu32, __FUNCTION__, token);
+        return;
+    }
+
+    auto message = std::make_unique<USP::TextMessage>(std::string{}, "audio.commit", USP::MessageType::Commit);
+    message->SetHeader("X-Client-Commit-Token", std::to_string(token));
+    if (hasChannel)
+    {
+        message->SetHeader("X-Client-Commit-Channel-Index", std::to_string(channelId));
+    }
+    SPX_DBG_TRACE_VERBOSE("%s: sending audio.commit token=%" PRIu32, __FUNCTION__, token);
+    UspSendMessage(std::move(message));
+}
+
 USP::MessageType CSpxUspRecoEngineAdapter::GetMessageType(const std::string& path)
 {
     auto found = m_message_name_to_type_map.find(path);
@@ -1697,8 +1722,27 @@ void CSpxUspRecoEngineAdapter::OnSpeechPhrase(const USP::SpeechPhraseMsg& messag
         }
         else
         {
+            // Inline commit: the Recognized event fires unconditionally via
+            // FireFinalResultNow. When message.commitToken != 0, the token is
+            // populated on the result inside FireFinalResultNow (via SetCommitToken)
+            // and apps discriminate a pure ACK (Duration == 0) by checking
+            // result.CommitToken != 0 and result.Text.empty().
+
             SPX_DBG_TRACE_VERBOSE("%s: FireFinalResultNow()", __FUNCTION__);
             FireFinalResultNow(message);
+
+            if (message.commitToken != 0)
+            {
+                // Bookkeeping-only site call: walk-and-discard-then-match
+                // the unacknowledged-commits FIFO. The Recognized
+                // event has already fired above; this call does not affect
+                // event dispatch.
+                SPX_DBG_TRACE_VERBOSE("%s: commit ACK bookkeeping token=%" PRIu32 " duration=%" PRIu64, __FUNCTION__, message.commitToken, message.duration);
+                InvokeOnSite([&](const SitePtr& site)
+                {
+                    site->AdapterCommitAcknowledged(this, message.commitToken, message.offset + m_startingOffset, message.duration);
+                });
+            }
         }
     }
     else
@@ -1919,6 +1963,17 @@ void CSpxUspRecoEngineAdapter::OnTranslationPhrase(const USP::TranslationPhraseM
                 }
                 namedProperties->Set(PropertyId::SpeechServiceResponse_RecognitionBackend, "online");
 
+                // Inline commit: populate the commit token on the result
+                // when the translation response's nested SpeechPhrase carried
+                // clientAudioMetadata["X-Client-Commit-Token"].
+                // Zero means "not a commit ACK" (the sentinel used throughout,
+                // matching Commit()'s return-value contract).
+                if (message.commitToken != 0)
+                {
+                    auto resultInit = SpxQueryInterface<ISpxRecognitionResultInit>(result);
+                    resultInit->SetCommitToken(message.commitToken);
+                }
+
                 if (!m_currentRequestId.empty())
                 {
                     namedProperties->Set(PropertyId::SpeechServiceResponse_RequestId, m_currentRequestId.c_str());
@@ -1935,6 +1990,19 @@ void CSpxUspRecoEngineAdapter::OnTranslationPhrase(const USP::TranslationPhraseM
                 // Fire the result
                 site->FireAdapterResult_FinalResult(message.offset, result);
             });
+
+            if (message.commitToken != 0)
+            {
+                // Bookkeeping-only site call: walk-and-discard-then-match
+                // the unacknowledged-commits FIFO. The Recognized
+                // event has already fired above; this call does not affect
+                // event dispatch.
+                SPX_DBG_TRACE_VERBOSE("%s: commit ACK bookkeeping token=%" PRIu32 " duration=%" PRIu64, __FUNCTION__, message.commitToken, message.duration);
+                InvokeOnSite([&](const SitePtr& site)
+                {
+                    site->AdapterCommitAcknowledged(this, message.commitToken, message.offset + m_startingOffset, message.duration);
+                });
+            }
         }
     }
     else
@@ -2754,6 +2822,16 @@ bool CSpxUspRecoEngineAdapter::IsUnifiedEndpoint()
     return true;
 }
 
+bool CSpxUspRecoEngineAdapter::IsConversationMode()
+{
+    // CONVERSATION is the reco mode resolved for continuous speech/translation
+    // recognition (see ResolveRecoMode). Note that continuous DICTATION also has
+    // m_singleShot == false, so m_singleShot alone cannot distinguish CONVERSATION
+    // from DICTATION; the reco mode string is the authoritative signal.
+    auto recoMode = GetOr(PropertyId::SpeechServiceConnection_RecoMode, "");
+    return PAL::stricmp(recoMode.c_str(), g_recoModeConversation) == 0;
+}
+
 void CSpxUspRecoEngineAdapter::AddLanguageJsonToContext(ajv::JsonBuilder& contextJson)
 {
     if(!IsUnifiedEndpoint())
@@ -2782,8 +2860,15 @@ void CSpxUspRecoEngineAdapter::AddInitialSilenceTimeoutJsonToContext(ajv::JsonBu
 {
     int initialSilenceTimeout = 0;
 
+    // When the user does not configure it, send IST=0 to the service if all the following are true:
+    // 1. Unified endpoint is used (instead of OMTS/CTS or TTS)
+    // 2. CONVERSATION mode is used (instead of INTERACTIVE or DICTATION)
+    // 3. User does not choose to use the service default (controlled by g_continuousLegacyDefaultDisconnectSilenceTimeout)
+    const bool applyDefaultZeroIST = IsUnifiedEndpoint() && IsConversationMode() && !GetOr<bool>(g_continuousLegacyDefaultDisconnectSilenceTimeout, true);
+
     if (auto maybeInitialSilenceTimeoutString = Get<std::string>(PropertyId::SpeechServiceConnection_InitialSilenceTimeoutMs))
     {
+        // The user explicitly set an initial silence timeout: always honor it.
         try
         {
             initialSilenceTimeout = std::stoi(maybeInitialSilenceTimeoutString.Get());
@@ -2800,14 +2885,29 @@ void CSpxUspRecoEngineAdapter::AddInitialSilenceTimeoutJsonToContext(ajv::JsonBu
         auto phraseDetectionJson = contextJson["phraseDetection"];
         phraseDetectionJson["initialSilenceTimeout"] = initialSilenceTimeout;
     }
+    else if (applyDefaultZeroIST)
+    {
+        // CONVERSATION mode (StartContinuousRecognition) default: when the user
+        // did not set an initial silence timeout, emit initialSilenceTimeout = 0. When the legacy
+        // flag is enabled the field is omitted as before. 
+        auto phraseDetectionJson = contextJson["phraseDetection"];
+        phraseDetectionJson["initialSilenceTimeout"] = 0;
+    }
 }
 
 void CSpxUspRecoEngineAdapter::AddEndSilenceTimeoutJsonToContext(ajv::JsonBuilder& contextJson)
 {
     int endSilenceTimeout = 0;
 
+    // When the user does not configure it, send EST=0 to the service if all the following are true:
+    // 1. Unified endpoint is used (instead of OMTS/CTS or TTS)
+    // 2. CONVERSATION mode is used (instead of INTERACTIVE or DICTATION)
+    // 3. User does not choose to use the service default (controlled by g_continuousLegacyDefaultDisconnectSilenceTimeout)
+    const bool applyDefaultZeroEST = IsUnifiedEndpoint() && IsConversationMode() && !GetOr<bool>(g_continuousLegacyDefaultDisconnectSilenceTimeout, true);
+
     if (auto maybeEndSilenceTimeoutString = Get<std::string>(PropertyId::SpeechServiceConnection_EndSilenceTimeoutMs))
     {
+        // The user explicitly set an end silence timeout: always honor it.
         try
         {
             endSilenceTimeout = std::stoi(maybeEndSilenceTimeoutString.Get());
@@ -2823,6 +2923,14 @@ void CSpxUspRecoEngineAdapter::AddEndSilenceTimeoutJsonToContext(ajv::JsonBuilde
         }
         auto phraseDetectionJson = contextJson["phraseDetection"];
         phraseDetectionJson["trailingSilenceTimeout"] = endSilenceTimeout;
+    }
+    else if (applyDefaultZeroEST)
+    {
+        // CONVERSATION mode (StartContinuousRecognition) default: when the user
+        // did not set an end silence timeout, emit trailingSilenceTimeout = 0. When the legacy
+        // flag is enabled the field is omitted as before. 
+        auto phraseDetectionJson = contextJson["phraseDetection"];
+        phraseDetectionJson["trailingSilenceTimeout"] = 0;
     }
 }
 
@@ -3078,12 +3186,32 @@ std::string CSpxUspRecoEngineAdapter::SetRecoMode(ajv::JsonBuilder& contextJson)
     return mode;
 }
 
+void CSpxUspRecoEngineAdapter::AddModelJsonToContext(ajv::JsonBuilder& contextJson)
+{
+    auto modelName = GetOr<std::string>("SPEECH-ModelName", "");
+    if (modelName.empty())
+    {
+        return;
+    }
+
+    auto modelJson = contextJson["model"];
+    modelJson["name"] <<= modelName;
+
+    // "options" is optional: emitted only when SPEECH-ModelOptions is set.
+    auto modelOptions = GetOr<std::string>("SPEECH-ModelOptions", "");
+    if (!modelOptions.empty())
+    {
+        modelJson["options"] = ajv::json::Parse(modelOptions);
+    }
+}
+
 std::string CSpxUspRecoEngineAdapter::GetSpeechContextJson()
 {
     ajv::JsonBuilder contextJson;
 
     AddModeJsonToContext(contextJson);
     AddLanguageJsonToContext(contextJson);
+    AddModelJsonToContext(contextJson);
     AddDgiJsonToContext(contextJson);
     AddKeywordDetectionJsonToContext(contextJson);
     AddLeftRightJsonToContext(contextJson);
@@ -3230,6 +3358,16 @@ void CSpxUspRecoEngineAdapter::FireFinalResultNow(const USP::SpeechPhraseMsg& me
 
         namedProperties->Set(PropertyId::SpeechServiceResponse_JsonResult, message.json.c_str());
         namedProperties->Set(PropertyId::SpeechServiceResponse_RecognitionBackend, "online");
+
+        // Inline commit: populate the commit token on the result
+        // when the phrase carries clientAudioMetadata["X-Client-Commit-Token"].
+        // Zero means "not a commit ACK" (the sentinel used throughout,
+        // matching Commit()'s return-value contract).
+        if (message.commitToken != 0)
+        {
+            auto resultInit = SpxQueryInterface<ISpxRecognitionResultInit>(result);
+            resultInit->SetCommitToken(message.commitToken);
+        }
 
         if (!m_currentRequestId.empty())
         {

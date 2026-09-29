@@ -6,6 +6,7 @@
 #include "stdafx.h"
 
 #include <sstream>
+#include <limits>
 
 #include "usp_connection.h"
 #include "usp_client_configuration.h"
@@ -60,6 +61,7 @@ const char* path::audio = "audio";
 const char* path::audioMetaData = "audio.metadata";
 const char* path::audioStart = "audio.start";
 const char* path::audioEnd = "audio.end";
+const char* path::audioCommit = "audio.commit";
 
 const char* json_properties::offset = "Offset";
 const char* json_properties::duration = "Duration";
@@ -75,6 +77,12 @@ const char* json_properties::phraseId = "Id";
 const char* json_properties::nbest = "NBest";
 const char* json_properties::confidence = "Confidence";
 const char* json_properties::display = "Display";
+const char* json_properties::clientAudioMetadata = "clientAudioMetadata";
+const char* json_properties::commitTokenHeader = "X-Client-Commit-Token";
+
+// Inline commit: defined below, near RetrieveSpeechPhraseResult. Declared here
+// because the translation.phrase handler calls it before that point.
+static uint32_t RetrieveCommitToken(const ajv::JsonReader& json);
 
 const char* json_properties::translation = "Translation";
 const char* json_properties::translationStatus = "TranslationStatus";
@@ -183,6 +191,16 @@ void CSpxUspConnection::Shutdown()
 
     m_connected = false;
     m_valid = false;
+
+    // Inline commit: a commit still waiting for a turn will never get one now.
+    // Discard it with a log rather than leaving it to be destroyed silently,
+    // so a lost commit is traceable.
+    if (m_deferredCommit != nullptr)
+    {
+        SPX_TRACE_ERROR("Dropping deferred audio.commit for token %s: the connection is shutting down.",
+            m_deferredCommit->GetHeader("X-Client-Commit-Token").c_str());
+        m_deferredCommit.reset();
+    }
 
     if (m_transport != nullptr && wasConnected)
     {
@@ -708,6 +726,64 @@ void CSpxUspConnection::QueueMessage(std::unique_ptr<Message> message)
         }
     }
 
+    // Inline commit: an audio.commit must be associated with an active speech
+    // turn, because the service correlates it by request id.
+    //
+    // If no turn exists yet, hold the message rather than discarding it. It
+    // is sent from QueueAudioSegment once the first audio message of a turn
+    // has gone out, which is the point at which the service considers the
+    // turn open - setting the request id alone is not enough, as the service
+    // takes the first audio message carrying a new id as the turn's start.
+    //
+    // Dropping it here instead would make an ordinary call sequence - start
+    // recognition, then commit - succeed or fail depending on which of two
+    // operations won a race decided by a millisecond.
+    //
+    // Only one commit is held, and a second arrival supersedes the first.
+    //
+    // The reason is not that a second arrival is unlikely. The pre-audio
+    // window is not bounded by the 100 ms commit rate limit and can be longer
+    // than it, so two commits can legitimately both be accepted here.
+    //
+    // The reason is that an audio.commit is headers-only and carries no
+    // position: the boundary it requests is defined by where the message sits
+    // in the audio stream (see CSpxUspRecoEngineAdapter::SendCommit). Both
+    // held commits would be released at the same point, immediately after the
+    // first audio message of the turn, so they would denote the same boundary.
+    // Holding a queue of them would send several requests for one position
+    // rather than preserve distinct ones.
+    //
+    // The application may well have intended distinct positions - the tokens
+    // were anchored at different push-stream write offsets - but the protocol
+    // has no way to express that distinction once neither commit has any audio
+    // in front of it. The superseded token is therefore never acknowledged;
+    // this is the "held commit superseded" case in the design's section 6, and
+    // the discard below is traced with its token.
+    //
+    // The test is whether the turn has sent its first audio message, not
+    // whether a request id exists. speech.context establishes the request id
+    // (see UpdateRequestId) before any audio goes out, so gating on
+    // m_speechRequestId alone would let a commit issued in that window - after
+    // speech.context, before the first audio message - be sent immediately,
+    // ahead of the audio that opens the turn. m_audioOffset is the same
+    // "has this turn sent audio" test QueueAudioSegment uses to compute
+    // newTurn, so the two stay consistent.
+    const bool turnHasSentAudio = (m_audioOffset != 0);
+    if (message->MessageType() == MessageType::Commit && !turnHasSentAudio)
+    {
+        if (m_deferredCommit != nullptr)
+        {
+            SPX_TRACE_ERROR("Dropping deferred audio.commit for token %s: superseded by a later commit before any audio was sent in the turn.",
+                m_deferredCommit->GetHeader("X-Client-Commit-Token").c_str());
+        }
+
+        SPX_DBG_TRACE_VERBOSE("Deferring audio.commit for token %s: no audio sent in the current turn yet; will send after the first audio message.",
+            message->GetHeader("X-Client-Commit-Token").c_str());
+
+        m_deferredCommit = std::move(message);
+        return;
+    }
+
     std::string usedRequestId = message->RequestId();
     if (usedRequestId.empty())
     {
@@ -790,6 +866,15 @@ std::string CSpxUspConnection::UpdateRequestId(const MessageType messageType, bo
         requestId = CreateRequestId();
         break;
 
+    case MessageType::Commit:
+        // Inline commit: audio.commit is associated with the current speech
+        // turn. QueueMessage defers a commit that arrives before the turn has
+        // sent any audio, releasing it after the first audio message, so by
+        // the time one reaches here the turn has sent audio and
+        // m_speechRequestId is non-empty.
+        requestId = m_speechRequestId;
+        break;
+
     case MessageType::Agent:
         requestId = CreateRequestId();
         break;
@@ -869,7 +954,27 @@ void CSpxUspConnection::QueueAudioSegment(const DataChunkPtr& audioChunk)
         m_transport->SendAudioData(path::audio, audioChunk, m_speechRequestId, newTurn);
     }
 
+    // Inline commit: account the audio before releasing any held commit.
+    //
+    // The release below re-enters QueueMessage, whose deferral gate tests
+    // m_audioOffset != 0. If the increment stayed after that call, the
+    // re-entered gate would still see zero, re-defer the very commit being
+    // released, and strand it: newTurn is false for every later chunk, so
+    // this block would never run again.
     m_audioOffset += size;
+
+    // Inline commit: a turn can also begin with audio rather than a context
+    // message - on a reconnect, or when recognition restarts on a stream that
+    // already has commits queued. Send any held commit now that a request id
+    // exists. It follows this first audio message, which is what the service
+    // requires: the turn is defined by that message.
+    if (newTurn && m_deferredCommit != nullptr && !m_speechRequestId.empty())
+    {
+        auto deferred = std::move(m_deferredCommit);
+        SPX_DBG_TRACE_VERBOSE("Sending deferred audio.commit for token %s now that a turn has begun with audio.",
+            deferred->GetHeader("X-Client-Commit-Token").c_str());
+        QueueMessage(std::move(deferred));
+    }
 }
 
 void CSpxUspConnection::QueueAudioEnd()
@@ -1192,6 +1297,18 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
             {
                 m_speechRequestId.clear();
                 m_speechContextMessageAllowed = true;
+
+                // Inline commit: a commit held for a turn that has now ended
+                // has nothing left to attach to. Discard it rather than let
+                // it carry into a later turn, where it would finalize audio
+                // the application never associated it with.
+                if (m_deferredCommit != nullptr)
+                {
+                    SPX_TRACE_ERROR("Dropping deferred audio.commit for token %s: the turn ended before it could be sent.",
+                        m_deferredCommit->GetHeader("X-Client-Commit-Token").c_str());
+                    m_deferredCommit.reset();
+                }
+
                 Invoke([&](auto callbacks) { callbacks->OnTurnEnd({ requestId }); });
             }
             else
@@ -1312,6 +1429,8 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
         }
         else if (path == path::translationPhrase)
         {
+            SPX_DBG_TRACE_VERBOSE("%s", msgTrace.str().c_str());
+
             auto status = ToRecognitionStatus(json[json_properties::recoStatus].AsString());
             if (isErrorRecognitionStatus(status))
             {
@@ -1330,6 +1449,16 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
                 {
                     translationResult.translationStatus = TranslationStatus::Success;
                 }
+
+                // Inline commit: v1 endpoints deliver the final translation result
+                // as translation.phrase, carrying the echoed commit metadata at the
+                // top level of this message. v2 endpoints use translation.response
+                // instead and nest the same metadata inside its SpeechPhrase object,
+                // handled below. Both versions must surface the token, or a commit
+                // issued during translation is never acknowledged to the
+                // application.
+                const uint32_t commitToken = RetrieveCommitToken(json.Reader());
+
                 // There is no speech recognition error, we fire a translation phrase event.
                 Invoke([&](auto callbacks) {
                     callbacks->OnTranslationPhrase({ std::move(speechResult.json),
@@ -1337,7 +1466,14 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
                                                     speechResult.duration,
                                                     std::move(speechResult.text),
                                                     std::move(translationResult),
-                                                    status });
+                                                    status,
+                                                    // Language and its confidence are not
+                                                    // populated on this path; passing the
+                                                    // existing defaults keeps v1 behaviour
+                                                    // unchanged apart from the commit token.
+                                                    "",
+                                                    ConfidenceLevel::InvalidMessage,
+                                                    commitToken });
                     });
 
                 if (!m_turnUsingHeaders)
@@ -1419,6 +1555,8 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
             }
             else if (json[json_properties::speechPhrase].IsOk())
             {
+                SPX_DBG_TRACE_VERBOSE("%s", msgTrace.str().c_str());
+
                 SPX_DBG_TRACE_INFO("Got translation response for %s.", json_properties::speechPhrase);
                 auto speechPhraseJson = json[json_properties::speechPhrase];
                 auto status = ToRecognitionStatus(speechPhraseJson[json_properties::recoStatus].AsString());
@@ -1448,7 +1586,8 @@ void CSpxUspConnection::OnTransportData(bool isBinary, const UspHeaders& headers
                                                         std::move(translationResult),
                                                         status,
                                                         std::move(speechPhraseMsg.language),
-                                                        speechPhraseMsg.languageDetectionConfidence });
+                                                        speechPhraseMsg.languageDetectionConfidence,
+                                                        speechPhraseMsg.commitToken });
                         });
 
 
@@ -1641,6 +1780,67 @@ void CSpxUspConnection::InvokeRecognitionErrorCallback(RecognitionStatus status,
     this->Invoke([&](auto callbacks) { callbacks->OnError(error); });
 }
 
+// Inline commit: the service echoes X-Client-* headers into the phrase
+// message's clientAudioMetadata (a JSON object). For inline commit, the
+// relevant echoed header is X-Client-Commit-Token whose value is the
+// decimal-string form of the app-visible commit token. If present, the
+// message is a commit ACK; the session uses this to correlate the ACK back to
+// an unacknowledged commit entry.
+//
+// Shared by every message shape that can carry an acknowledgment, because the
+// metadata sits at a different place in each and the endpoint version decides
+// which arrives:
+//   speech.phrase          - top level (both endpoint versions)
+//   translation.phrase     - top level (v1 endpoints)
+//   translation.response   - inside the nested SpeechPhrase object (v2)
+// Returns 0 when no token is present, which is the "not an ACK" value.
+static uint32_t RetrieveCommitToken(const ajv::JsonReader& json)
+{
+    auto clientAudioMetadata = json[json_properties::clientAudioMetadata];
+    if (!clientAudioMetadata.IsObject())
+    {
+        return 0;
+    }
+
+    // Defensive cap on incoming clientAudioMetadata JSON size. A
+    // well-behaved service produces a small JSON object here; a
+    // malformed or adversarial one could carry a very large payload.
+    // Reject anything above kMaxClientAudioMetadataSize as a protocol
+    // violation and treat the message as if clientAudioMetadata were
+    // absent.
+    constexpr size_t kMaxClientAudioMetadataSize = 4096;
+    const auto metadataJson = clientAudioMetadata.AsJson();
+    if (metadataJson.size() > kMaxClientAudioMetadataSize)
+    {
+        SPX_TRACE_ERROR("clientAudioMetadata exceeds size cap (%zu > %zu bytes); ignoring", metadataJson.size(), kMaxClientAudioMetadataSize);
+        return 0;
+    }
+
+    auto tokenValue = clientAudioMetadata[json_properties::commitTokenHeader];
+    if (!tokenValue.IsString())
+    {
+        return 0;
+    }
+
+    try
+    {
+        // Token width is uint32_t. std::stoul returns
+        // unsigned long, which is >= 32 bits; validate the range.
+        unsigned long parsed = std::stoul(tokenValue.AsString());
+        if (parsed > std::numeric_limits<uint32_t>::max())
+        {
+            SPX_TRACE_ERROR("Commit token in clientAudioMetadata out of uint32_t range: %s", tokenValue.AsString().c_str());
+            return 0;
+        }
+        return static_cast<uint32_t>(parsed);
+    }
+    catch (const std::exception&)
+    {
+        SPX_TRACE_ERROR("Commit token in clientAudioMetadata is not a valid uint32: %s", tokenValue.AsString().c_str());
+        return 0;
+    }
+}
+
 SpeechPhraseMsg CSpxUspConnection::RetrieveSpeechPhraseResult(const ajv::JsonReader& json)
 {
     SpeechPhraseMsg result;
@@ -1686,6 +1886,9 @@ SpeechPhraseMsg CSpxUspConnection::RetrieveSpeechPhraseResult(const ajv::JsonRea
             result.languageDetectionConfidence = ToConfidenceLevel(confidence);
         }
     }
+
+    result.commitToken = RetrieveCommitToken(json);
+
     return result;
 }
 

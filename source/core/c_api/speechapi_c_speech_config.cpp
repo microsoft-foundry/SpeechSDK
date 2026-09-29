@@ -132,6 +132,20 @@ SPXAPI speech_config_get_property_bag(SPXSPEECHCONFIGHANDLE hconfig, SPXPROPERTY
     return CSpxApiManager::QueryInterface<SPXSPEECHCONFIGHANDLE, ISpxSpeechConfig, SPXPROPERTYBAGHANDLE, ISpxNamedProperties>(hconfig, hpropbag);
 }
 
+SPXAPI speech_config_set_model(SPXSPEECHCONFIGHANDLE hconfig, const char* model)
+{
+    SPX_RETURN_HR_IF(SPXERR_INVALID_ARG, model == nullptr);
+
+    SPXAPI_INIT_HR_TRY(hr)
+    {
+        auto configs = CSpxSharedPtrHandleTableManager::Get<ISpxSpeechConfig, SPXSPEECHCONFIGHANDLE>();
+        auto config = (*configs)[hconfig];
+        auto namedProperties = SpxQueryInterface<ISpxNamedProperties>(config);
+        namedProperties->SetStringValue("SPEECH-ModelName", model);
+    }
+    SPXAPI_CATCH_AND_RETURN_HR(hr);
+}
+
 SPXAPI speech_config_set_audio_output_format(SPXSPEECHCONFIGHANDLE hconfig, Speech_Synthesis_Output_Format formatId)
 {
     SPXAPI_INIT_HR_TRY(hr)

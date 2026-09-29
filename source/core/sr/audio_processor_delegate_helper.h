@@ -27,12 +27,21 @@ public:
 
     void DelegateSetFormat(const SPXWAVEFORMATEX* pformat)
     {
-        return InvokeOnDelegateR(C::GetDelegate(), &I::SetFormat, pformat);
+        InvokeOnDelegate(C::GetDelegate(), &I::SetFormat, pformat);
     }
 
     void DelegateProcessAudio(const DataChunkPtr& audioChunk)
     {
-        return InvokeOnDelegateR(C::GetDelegate(), &I::ProcessAudio, audioChunk);
+        InvokeOnDelegate(C::GetDelegate(), &I::ProcessAudio, audioChunk);
+    }
+
+    // Inline commit: forward the commit marker to the wrapped processor.
+    // Without this, a pass-through processor built on this helper inherits
+    // ISpxAudioProcessor's default no-op ProcessCommit and the commit is
+    // silently dropped instead of reaching the session.
+    void DelegateProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId)
+    {
+        InvokeOnDelegate(C::GetDelegate(), &I::ProcessCommit, token, offsetBytes, hasChannel, channelId);
     }
 };
 }}}} // Microsoft::CognitiveServices::Speech::Impl

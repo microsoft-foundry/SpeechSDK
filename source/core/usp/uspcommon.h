@@ -49,6 +49,8 @@ namespace USP {
         static const char* audioMetaData;
         static const char* audioStart;
         static const char* audioEnd;
+        // Inline commit: outbound commit request.
+        static const char* audioCommit;
     };
 
     class json_properties
@@ -68,6 +70,12 @@ namespace USP {
         static const char* nbest;
         static const char* confidence;
         static const char* display;
+
+        // Inline commit: JSON field in speech.phrase body carrying echoed
+        // X-Client-* headers from the originating audio.commit.
+        static const char* clientAudioMetadata;
+        // Key inside clientAudioMetadata identifying the echoed commit token.
+        static const char* commitTokenHeader;
 
         static const char* translation;
         static const char* translationStatus;

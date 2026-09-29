@@ -342,6 +342,27 @@ public:
         return Properties.GetProperty(PropertyId::SpeechServiceAuthorization_Token, SPXSTRING());
     }
 
+    /// <summary>
+    /// Enables (or disables) the SDK 1.51 (or older) default behavior for the initial and end
+    /// (disconnect) silence timeouts during continuous recognition.
+    ///
+    /// When called with parameter true, the SDK does not send the initial silence timeout (IST)
+    /// or end silence timeout (EST) to the service when they are not explicitly configured,
+    /// letting the service apply its own defaults. When called with parameter false, the SDK
+    /// sends a value of 0 to the service for each timeout that is not explicitly configured.
+    ///
+    /// Explicitly configured timeout values are always honored regardless of this flag,
+    /// and this setting only affects continuous recognition (StartContinuousRecognition);
+    /// single-shot recognition (RecognizeOnce) is unaffected.
+    ///
+    /// If this method is not called, the SDK behaves as if it were called with parameter true.
+    /// </summary>
+    /// <param name="enable">true to omit unspecified IST and EST values; false to send 0 for unspecified IST and EST values.</param>
+    void EnableLegacyDefaultDisconnectSilenceTimeout(bool enable)
+    {
+        Properties.SetProperty("Continuous-LegacyDefaultDisconnectSilenceTimeout", enable ? "true" : "false");
+    }
+
 private:
     DISABLE_DEFAULT_CTORS(SpeechRecognizer);
     friend class Microsoft::CognitiveServices::Speech::Session;

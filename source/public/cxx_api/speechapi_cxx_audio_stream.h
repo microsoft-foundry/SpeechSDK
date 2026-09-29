@@ -286,6 +286,48 @@ public:
     /// </summary>
     void Close() { SPX_THROW_ON_FAIL(CloseStream()); }
 
+    /// <summary>
+    /// Requests that the audio written so far be committed as a completed
+    /// segment. Non-blocking; returns immediately with a correlation token.
+    /// </summary>
+    /// <returns>
+    /// A commit token &gt;= 1 that can be matched against the CommitToken
+    /// property on a subsequent Recognized event, or 0 if the call was
+    /// rejected outright e.g. based on the SDK-local rate limit (at most
+    /// one successful Commit() per 100 ms per push stream).
+    /// </returns>
+    /// <remarks>
+    /// A returned non-zero token does not guarantee a corresponding
+    /// Recognized event; the commit may be silently dropped if the service
+    /// does not support the feature, or if the session is torn down before
+    /// the acknowledgment arrives. A commit that has not yet been delivered
+    /// is also discarded when end of audio is signalled - by Close(), or by
+    /// a Write() with an empty buffer - because the resulting flush already
+    /// produces a result covering the audio the commit was anchored to.
+    /// </remarks>
+    uint32_t Commit()
+    {
+        uint32_t token = 0;
+        SPX_THROW_ON_FAIL(push_audio_input_stream_commit(m_haudioStream, &token));
+        return token;
+    }
+
+    /// <summary>
+    /// Same as Commit() but scoped to a single channel of a multichannel
+    /// input. The service acknowledges the commit on the named channel only.
+    /// See <see cref="Commit()"/> for return-value semantics.
+    /// </summary>
+    /// <param name="channelId">0-indexed channel identifier.</param>
+    /// <returns>
+    /// A commit token &gt;= 1, or 0 if the call was rejected by
+    /// the SDK-local rate limit.
+    /// </returns>
+    uint32_t Commit(uint32_t channelId)
+    {
+        uint32_t token = 0;
+        SPX_THROW_ON_FAIL(push_audio_input_stream_commit_channel(m_haudioStream, channelId, &token));
+        return token;
+    }
 
 protected:
 
