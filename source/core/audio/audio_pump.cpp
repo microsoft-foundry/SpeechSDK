@@ -12,6 +12,9 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <queue>
+#include <vector>
 #include "audio_pump.h"
 #include "site_helpers.h"
 #include "service_helpers.h"
@@ -344,6 +347,59 @@ void CSpxAudioPump::PumpThread(std::shared_ptr<ISpxAudioPump> keepAlive, std::sh
                     auto cbRead = m_reader->Read(data.get(), bytesPerFrame);
                     totalSkip += static_cast<uint64_t>(cbRead);
 
+                    // Inline commit is not supported when MAS audio processing
+                    // is enabled, so markers are drained and discarded here.
+                    //
+                    // Draining is not optional, and this loop must not simply
+                    // be removed. The reader caps every read at the position of
+                    // its next pending marker and returns a zero-length read
+                    // once that position is reached (see
+                    // CSpxPushAudioInputStream::Read). A marker left in the
+                    // queue would therefore stall the reader permanently, and
+                    // the zero-length read would be taken for end of stream by
+                    // the check below - discarding every byte the application
+                    // wrote after the commit. Popping the marker is what
+                    // releases the cap.
+                    //
+                    // Discarding here follows the general rule for
+                    // undeliverable commits: the commit is dropped and the loss
+                    // recorded in the log, never escalated to an error or a
+                    // session failure. The application sees a token that is
+                    // never acknowledged, which is the documented outcome for
+                    // every other undeliverable commit.
+                    uint32_t token = 0;
+                    uint64_t offsetBytes = 0;
+                    bool hasChannel = false;
+                    uint32_t channelId = 0;
+                    bool discardedCommitMarker = false;
+                    while (m_reader->PopPendingCommitMarker(&token, &offsetBytes, &hasChannel, &channelId))
+                    {
+                        discardedCommitMarker = true;
+                        SPX_TRACE_ERROR("%s: discarding commit token=%" PRIu32 " at offsetBytes=%" PRIu64 ": inline commit is not supported when MAS audio processing is enabled",
+                            __FUNCTION__, token, offsetBytes);
+                    }
+
+                    // A zero-length read that arrived with a commit marker is a
+                    // commit boundary, not the end of the stream.
+                    //
+                    // When a commit lands exactly at the current read position
+                    // there is no audio to return before it, so Read() returns
+                    // zero and the marker is popped immediately above. Without
+                    // this check that zero would signal end of stream to MAS
+                    // and break out of the loop, so every byte written after
+                    // the commit would be discarded - the commit would be
+                    // inert, but the recognition would be truncated.
+                    //
+                    // Going round the loop again is safe: the marker has been
+                    // popped, so it cannot cause a second zero-length read, and
+                    // the next Read() either returns audio or blocks waiting
+                    // for it.
+                    if (cbRead == 0 && discardedCommitMarker)
+                    {
+                        SPX_DBG_TRACE_VERBOSE("[%p]CSpxAudioPump::PumpThread(): MAS zero-length read at a discarded commit boundary; not end of stream", (void*)this);
+                        continue;
+                    }
+
                     if (totalSkip > skipSize || cbRead == 0)
                     {
                         auto readCallDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
@@ -405,6 +461,7 @@ void CSpxAudioPump::PumpThread(std::shared_ptr<ISpxAudioPump> keepAlive, std::sh
 
             // Read processed audio from MAS and send it to pISpxAudioProcessor
             uint32_t cbRead = processedBytesPerFrame;
+
             while (checkAndChangeState() && (cbRead == processedBytesPerFrame))
             {
                 cbRead = processedAudioReader->Read(processedData.get(), processedBytesPerFrame);
@@ -458,7 +515,42 @@ void CSpxAudioPump::PumpThread(std::shared_ptr<ISpxAudioPump> keepAlive, std::sh
                 auto cbRead = m_reader->Read(data.get(), bytesPerFrame);
                 totalSkip += (uint64_t)cbRead;
 
-                if (totalSkip > skipSize || cbRead == 0)
+                // Inline commit: collect any commit markers that fall at or before
+                // the reader's cumulative-bytes-read position. These are collected
+                // before the audio is forwarded, but delivered after it, so the
+                // session still observes audio-then-commit ordering.
+                //
+                // Collecting first is what lets a zero-length read caused by a
+                // commit boundary be told apart from a genuine end-of-stream zero
+                // read. The reader returns 0 bytes when a Commit() lands exactly at
+                // the current read position (for example two commits with no audio
+                // written between them). Forwarding a zero-length chunk in that case
+                // would be wrong: downstream, a zero-length chunk means "end of
+                // audio" and makes the USP adapter flush the turn, which ends the
+                // turn on the service and invalidates any later commit in the same
+                // turn.
+                struct DrainedCommit
+                {
+                    uint32_t token;
+                    uint64_t offsetBytes;
+                    bool hasChannel;
+                    uint32_t channelId;
+                };
+                std::vector<DrainedCommit> drainedCommits;
+                {
+                    uint32_t token = 0;
+                    uint64_t offsetBytes = 0;
+                    bool hasChannel = false;
+                    uint32_t channelId = 0;
+                    while (m_reader->PopPendingCommitMarker(&token, &offsetBytes, &hasChannel, &channelId))
+                    {
+                        drainedCommits.push_back({ token, offsetBytes, hasChannel, channelId });
+                    }
+                }
+
+                // Forward audio when we actually read some (subject to the skip
+                // window), or when a zero read genuinely indicates end of stream.
+                if ((cbRead > 0 && totalSkip > skipSize) || (cbRead == 0 && drainedCommits.empty()))
                 {
                     auto readCallDuration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
                     SPX_DBG_TRACE_VERBOSE("[%p]CSpxAudioPump::PumpThread(): read frame duration: %" PRIu64 " ms => sending audio buffer size %u", (void*)this, (uint64_t)readCallDuration.count(), cbRead);
@@ -473,8 +565,16 @@ void CSpxAudioPump::PumpThread(std::shared_ptr<ISpxAudioPump> keepAlive, std::sh
                     pISpxAudioProcessor->ProcessAudio(std::make_shared<DataChunk>(data, cbRead, std::move(capturedTime), std::move(userId)));
                 }
 
+                // Inline commit: deliver the markers now that the audio preceding
+                // them has been forwarded.
+                for (const auto& commit : drainedCommits)
+                {
+                    SPX_DBG_TRACE_VERBOSE("[%p]CSpxAudioPump::PumpThread(): commit marker drained: token=%" PRIu32 " offsetBytes=%" PRIu64, (void*)this, commit.token, commit.offsetBytes);
+                    pISpxAudioProcessor->ProcessCommit(commit.token, commit.offsetBytes, commit.hasChannel, commit.channelId);
+                }
+
                 // If we didn't read any data, move to the 'Idle' state
-                if (cbRead == 0)
+                if (cbRead == 0 && drainedCommits.empty())
                 {
                     SPX_TRACE_INFO("[%p]CSpxAudioPump::PumpThread(): m_reader->Read() read ZERO (0) bytes... Indicating end of stream based input.", (void*)this);
                     std::unique_lock<std::mutex> lock(m_mutex);

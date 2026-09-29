@@ -135,6 +135,11 @@ public:
         InvokeOnDelegate(C::GetDelegate(), &I::AdapterCompletedSetFormatStop, adapter);
     }
 
+    void DelegateAdapterCommitAcknowledged(ISpxRecoEngineAdapter* adapter, uint32_t token, uint64_t offset, uint64_t duration)
+    {
+        InvokeOnDelegate(C::GetDelegate(), &I::AdapterCommitAcknowledged, adapter, token, offset, duration);
+    }
+
     void DelegateAdapterRequestingAudioMute(ISpxRecoEngineAdapter* adapter, bool muteAudio)
     {
         InvokeOnDelegate(C::GetDelegate(), &I::AdapterRequestingAudioMute, adapter, muteAudio);

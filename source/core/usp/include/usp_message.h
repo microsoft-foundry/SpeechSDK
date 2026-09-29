@@ -18,7 +18,7 @@ namespace CognitiveServices {
 namespace Speech {
 namespace USP {
 
-    enum class MessageType { Config, Context, Agent, AgentContext, SpeechEvent, Event, Ssml, Audio, Unknown };
+    enum class MessageType { Config, Context, Agent, AgentContext, SpeechEvent, Event, Ssml, Audio, Commit, Unknown };
 
     /// <summary>
     /// Base class representing all USP web socket messages

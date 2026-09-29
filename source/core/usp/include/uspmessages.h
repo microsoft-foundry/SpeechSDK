@@ -227,6 +227,11 @@ struct SpeechPhraseMsg : public SpeechMsg
     std::string displayText;
     std::string language;
     ConfidenceLevel languageDetectionConfidence{ ConfidenceLevel::InvalidMessage };
+
+    // Inline commit: token echoed from audio.commit via
+    // speech.phrase.clientAudioMetadata["X-Client-Commit-Token"].
+    // Zero means "no commit token present" (ordinary speech.phrase).
+    uint32_t commitToken{ 0 };
 };
 
 /**
@@ -272,14 +277,22 @@ struct TranslationPhraseMsg : public TranslationHypothesisMsg
         TranslationResult&& translation,
         RecognitionStatus status,
         std::string&& language = "",
-        ConfidenceLevel confidence = ConfidenceLevel::InvalidMessage) :
+        ConfidenceLevel confidence = ConfidenceLevel::InvalidMessage,
+        uint32_t commitTokenValue = 0) :
         TranslationHypothesisMsg(std::move(content), offset, duration, std::move(text), std::move(translation), std::move(language)),
         recognitionStatus(status),
-        languageDetectionConfidence(confidence)
+        languageDetectionConfidence(confidence),
+        commitToken(commitTokenValue)
     {}
 
     RecognitionStatus recognitionStatus;
     ConfidenceLevel languageDetectionConfidence;
+
+    // Inline commit: token echoed from audio.commit via the nested
+    // SpeechPhrase.clientAudioMetadata["X-Client-Commit-Token"] of a
+    // translation.response message.
+    // Zero means "no commit token present" (ordinary translation result).
+    uint32_t commitToken{ 0 };
 };
 
 /**

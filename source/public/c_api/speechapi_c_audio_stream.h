@@ -39,6 +39,25 @@ SPXAPI push_audio_input_stream_close(SPXAUDIOSTREAMHANDLE haudioStream);
 SPXAPI push_audio_input_stream_set_property_by_id(SPXAUDIOSTREAMHANDLE haudioStream, int id, const char* value);
 SPXAPI push_audio_input_stream_set_property_by_name(SPXAUDIOSTREAMHANDLE haudioStream, const char* name, const char* value);
 
+// Inline commit: request that the audio written so far be committed as a
+// completed segment. Non-blocking. On success, *pToken receives a token
+// >= 1 that can be matched against the CommitToken field on a subsequent
+// Recognized event's SpeechRecognitionResult. On rate-limit rejection
+// (at most one successful call per 100 ms per push stream), *pToken
+// receives 0. A returned non-zero token does not guarantee a matching
+// Recognized event; the commit may be silently dropped if the service
+// does not support the feature, or if the session is torn down before
+// the acknowledgment arrives. A commit that has not yet been delivered is
+// also discarded when end of audio is signalled - by close, or by a write
+// with an empty buffer - because the resulting flush already produces a
+// result covering the audio the commit was anchored to.
+SPXAPI push_audio_input_stream_commit(SPXAUDIOSTREAMHANDLE haudioStream, uint32_t* pToken);
+
+// Inline commit: channel-scoped commit; the service processes the request
+// only for the named 0-indexed channel of a multichannel input. See
+// push_audio_input_stream_commit for return-value semantics.
+SPXAPI push_audio_input_stream_commit_channel(SPXAUDIOSTREAMHANDLE haudioStream, uint32_t channelId, uint32_t* pToken);
+
 // pull audio output stream
 SPXAPI pull_audio_output_stream_read(SPXAUDIOSTREAMHANDLE haudioStream, uint8_t* buffer, uint32_t bufferSize, uint32_t* pfilledSize);
 

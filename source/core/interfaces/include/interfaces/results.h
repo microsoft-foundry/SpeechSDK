@@ -35,6 +35,13 @@ SPX_INTERFACE(ISpxRecognitionResult)
     virtual void SetOffset(uint64_t) = 0;
     virtual uint64_t GetDuration() const = 0;
 
+    // Inline commit: commit token that this result acknowledges, or 0 if
+    // this result is not a commit acknowledgment. Populated by the session
+    // from the echoed clientAudioMetadata["X-Client-Commit-Token"] on the
+    // corresponding speech.phrase. Default 0 keeps
+    // implementations that never carry a commit token unaffected.
+    virtual uint32_t GetCommitToken() const { return 0; }
+
     virtual void SetLatency(uint64_t) = 0;
 
     virtual std::shared_ptr<ISpxAudioDataStream> GetAudioDataStream() = 0;
@@ -49,6 +56,11 @@ SPX_INTERFACE(ISpxRecognitionResultInit)
     virtual void InitFinalResult(ResultReason reason, NoMatchReason noMatchReason, const char* text, uint64_t offset, uint64_t duration, const char* phraseId) = 0;
     virtual void InitErrorResult(const std::shared_ptr<ISpxErrorInformation>& error) = 0;
     virtual void InitEndOfStreamResult() = 0;
+
+    // Inline commit: set the commit token that this result acknowledges.
+    // Called by the session on ACK arrival before firing Recognized.
+    // Not needed for non-commit results.
+    virtual void SetCommitToken(uint32_t /*commitToken*/) {}
 };
 
 enum class TranslationStatusCode { Success, Error };

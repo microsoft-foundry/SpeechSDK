@@ -68,6 +68,11 @@ public:
     uint64_t GetDuration() const override { return m_duration; }
     void SetOffset(uint64_t offset) override { m_offset = offset; }
 
+    // Inline commit: non-zero when this result acknowledges a commit
+    // request (populated by CSpxAudioStreamSession on ACK arrival).
+    uint32_t GetCommitToken() const override { return m_commitToken; }
+    void SetCommitToken(uint32_t commitToken) override { m_commitToken = commitToken; }
+
     void SetLatency(uint64_t latency) override;
 
     inline std::shared_ptr<ISpxAudioDataStream> GetAudioDataStream() final
@@ -156,6 +161,7 @@ private:
     size_t m_audioLength{0};
     uint64_t m_offset{0};
     uint64_t m_duration{0};
+    uint32_t m_commitToken{0};
     std::string m_requestId;
 };
 

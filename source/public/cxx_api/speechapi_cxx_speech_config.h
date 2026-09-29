@@ -183,6 +183,24 @@ public:
     }
 
     /// <summary>
+    /// Sets the model to use for speech recognition.
+    /// </summary>
+    /// <param name="model">The model name. An empty value clears the configured model.</param>
+    void SetModel(const SPXSTRING& model)
+    {
+        SPX_THROW_ON_FAIL(speech_config_set_model(m_hconfig, Utils::ToUTF8(model).c_str()));
+    }
+
+    /// <summary>
+    /// Gets the model configured for speech recognition.
+    /// </summary>
+    /// <returns>The model name, or an empty string if no model is configured.</returns>
+    SPXSTRING GetModel() const
+    {
+        return GetProperty("SPEECH-ModelName");
+    }
+
+    /// <summary>
     /// Sets the language of the speech synthesizer.
     /// Added in version 1.4.0
     /// </summary>

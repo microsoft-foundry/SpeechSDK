@@ -199,6 +199,23 @@ void CSpxAndroidCodecAdapter::SetFormat(const SPXWAVEFORMATEX* format)
 
                 size_t bufsize;
                 auto buf = AMediaCodec_getOutputBuffer(mediaCodec, status, &bufsize);
+                // Avoid dereferencing a null buffer. Release the dequeued slot, skip empty output,
+                // and fail if the codec reports data without returning an accessible buffer.
+                if (buf == nullptr)
+                {
+                    AMediaCodec_releaseOutputBuffer(mediaCodec, status, false);
+                    // EOS is handled above. A null, zero-sized non-EOS output is unexpected in buffer mode,
+                    // so release the dequeued buffer and continue decoding.
+                    if (info.size == 0)
+                    {
+                        SPX_TRACE_WARNING("CSpxAndroidCodecAdapter: MediaCodec returned a null output buffer with size 0.");
+                        continue;
+                    }
+
+                    SPX_TRACE_ERROR("CSpxAndroidCodecAdapter: Failed to get output buffer with size %d.", info.size);
+                    this->m_errorMessage = "Failed to get MediaCodec output buffer with size " + std::to_string(info.size) + ".";
+                    break;
+                }
                 // The Nyquist bandwidth should be align with request output sample rate, so filter is not needed here.
                 if (downsampleRatio > 1)
                 {
@@ -210,7 +227,8 @@ void CSpxAndroidCodecAdapter::SetFormat(const SPXWAVEFORMATEX* format)
                 }
                 this->m_writeCallback(buf, info.size / downsampleRatio);
 
-                AMediaCodec_releaseOutputBuffer(mediaCodec, status, info.size != 0);
+                // No output surface is configured, so return the buffer to the codec without rendering.
+                AMediaCodec_releaseOutputBuffer(mediaCodec, status, false);
                 SPX_TRACE_VERBOSE("CSpxAndroidCodecAdapter: decode outputs, size %d.", info.size / downsampleRatio);
             }
             else if (status == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED)

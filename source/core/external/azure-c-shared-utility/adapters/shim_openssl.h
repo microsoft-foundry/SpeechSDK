@@ -14,24 +14,30 @@
 #define USE_OPENSSL_1_0_2 0
 #define USE_OPENSSL_1_1_0_OR_UP 1
 #define USE_OPENSSL_3_0_X 0
-#elif (OPENSSL_VERSION_NUMBER >> 20) == 0x300
-// OpenSSL 3.0.x
-// OpenSSL 3+ changed how versions of patches are defined
-// and patches will update the 3rd (patch number) of the
-// semantic versioning number.  This means we don't want to
-// look at the 3rd number to determine if we are using OpenSSL 3.0
+#elif (OPENSSL_VERSION_NUMBER >> 28) == 0x3
+// OpenSSL 3.x (3.0 and later).
+// We accept any 3.x header set but deliberately restrict ourselves to the
+// OpenSSL 3.0 API surface, so that binaries built against newer 3.x headers
+// (e.g. 3.5) still load and run against a system OpenSSL 3.0 libcrypto/libssl
+// (on such Linux systems). See FOR_ALL_OPENSSL_FUNCTIONS below: any symbol
+// added under REQUIRED_FUNCTION_3_0_X must exist in OpenSSL 3.0.0.
+// The flag name USE_OPENSSL_3_0_X is preserved to minimize churn in call sites;
+// its meaning is "3.x headers, 3.0 API subset".
 #define USE_OPENSSL_1_0_2 0
 #define USE_OPENSSL_1_1_0_OR_UP 1
 #define USE_OPENSSL_3_0_X 1
-// For now, we disable deprecation warnings/errors in OpenSSL 3.0.x
+// For now, we disable deprecation warnings/errors in the OpenSSL 3.x branch.
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #else
-#error Fatal: unexpected OPENSSL_VERSION_NUMBER; OpenSSL 1.0.2, 1.1.0, 1.1.1, or 3.0.x is required.
+#error Fatal: unexpected OPENSSL_VERSION_NUMBER; OpenSSL 1.0.2, 1.1.0, 1.1.1, or 3.x is required.
 // Note: version >= 0x20000000L and < 0x30000000L would be the FIPS-enabled one.
 // Also explicitly ignored here.
 #endif
 
-#if USE_OPENSSL_1_1_0_OR_UP
+#if USE_OPENSSL_3_0_X
+// Target the 3.0 API surface even when compiling against newer 3.x headers.
+#define OPENSSL_API_COMPAT 0x30000000L
+#elif USE_OPENSSL_1_1_0_OR_UP
 #define OPENSSL_API_COMPAT 0x10100000L
 #else
 #define OPENSSL_API_COMPAT 0x10000000L
@@ -55,6 +61,13 @@
 
 #if defined(USE_OPENSSL_DYNAMIC)
 
+// Maintenance rule for the 3.x branch:
+// Any symbol added under REQUIRED_FUNCTION_3_0_X (or in the USE_OPENSSL_3_0_X
+// #define blocks below) MUST exist in OpenSSL 3.0.0. The SDK is built against
+// 3.x headers but must load and run against a system OpenSSL 3.0 libcrypto/
+// libssl (on such Linux systems). Adding a symbol introduced in 3.1+ will cause
+// dlsym() to return NULL at load time on such systems. Verify new symbols
+// against openssl-3.0.x headers before adding them here.
 #define FOR_ALL_OPENSSL_FUNCTIONS \
     REQUIRED_FUNCTION(ASN1_GENERALIZEDTIME_free) \
     REQUIRED_FUNCTION_1_0_2(ASN1_STRING_data) \

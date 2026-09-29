@@ -132,6 +132,11 @@ public:
         D::DelegateAdapterCompletedSetFormatStop(adapter);
     }
 
+    void AdapterCommitAcknowledged(ISpxRecoEngineAdapter* adapter, uint32_t token, uint64_t offset, uint64_t duration) override
+    {
+        D::DelegateAdapterCommitAcknowledged(adapter, token, offset, duration);
+    }
+
     void AdapterRequestingAudioMute(ISpxRecoEngineAdapter* adapter, bool muteAudio) override
     {
         D::DelegateAdapterRequestingAudioMute(adapter, muteAudio);

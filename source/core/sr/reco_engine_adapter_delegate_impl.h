@@ -78,6 +78,16 @@ public:
     {
         D::DelegateProcessAudio(audioChunk);
     }
+
+    // Inline commit: forward audio.commit down to the wrapped adapter.
+    // Both wrapper layers in the USP path (the offset-fixup wrapper and
+    // the retry adapter) derive from this class, so this single override
+    // keeps the commit travelling until it reaches
+    // CSpxUspRecoEngineAdapter::SendCommit, which puts it on the wire.
+    void SendCommit(uint32_t token, bool hasChannel, uint32_t channelId) override
+    {
+        D::DelegateSendCommit(token, hasChannel, channelId);
+    }
 };
 
 } } } } // Microsoft::CognitiveServices::Speech::Impl

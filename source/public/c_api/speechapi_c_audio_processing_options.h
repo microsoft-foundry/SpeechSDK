@@ -160,6 +160,7 @@ const int AUDIO_INPUT_PROCESSING_ENABLE_V2 = 0x00000040;
 /// Enables the Personalized Noise Suppression (PNS) pipeline.
 /// PNS only supports mono microphone input with an optional mono speaker reference channel.
 /// When using PNS, PresetMicrophoneArrayGeometry must be set to Mono. Microphone array geometries are not supported.
+/// Reserved for Microsoft first-party applications.
 /// </summary>
 const int AUDIO_INPUT_PROCESSING_PNS_ENABLE = 0x00000080;
 
@@ -175,7 +176,20 @@ SPXAPI audio_processing_options_get_beamforming_end_angle(SPXAUDIOPROCESSINGOPTI
 SPXAPI audio_processing_options_get_microphone_count(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, uint16_t* microphoneCount);
 SPXAPI audio_processing_options_get_microphone_coordinates(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, AudioProcessingOptions_MicrophoneCoordinates* microphoneCoordinates, uint16_t microphoneCount);
 SPXAPI audio_processing_options_get_speaker_reference_channel(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, AudioProcessingOptions_SpeakerReferenceChannel* speakerReferenceChannel);
+/// <summary>
+/// Sets the speaker signature used by personalized noise suppression.
+/// Reserved for Microsoft first-party applications.
+/// </summary>
 SPXAPI audio_processing_options_set_speaker_signature(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, const float* speakerSignature, uint32_t length);
+/// <summary>
+/// Sets the personalized noise suppression model and matching license.
+/// Reserved for Microsoft first-party applications.
+/// </summary>
+SPXAPI audio_processing_options_set_personalized_noise_suppression_model(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, const char* modelPath, const char* license);
+/// <summary>
+/// Gets the speaker signature used by personalized noise suppression.
+/// Reserved for Microsoft first-party applications.
+/// </summary>
 SPXAPI audio_processing_options_get_speaker_signature(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, float* speakerSignature, uint32_t length, uint32_t* lengthWritten);
 SPXAPI audio_processing_options_release(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions);
 SPXAPI audio_processing_options_get_property_bag(SPXAUDIOPROCESSINGOPTIONSHANDLE hoptions, SPXPROPERTYBAGHANDLE* hpropbag);

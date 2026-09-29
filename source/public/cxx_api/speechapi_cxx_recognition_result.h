@@ -95,6 +95,23 @@ public:
     uint32_t Channel() const { return m_channel; }
 
     /// <summary>
+    /// Inline commit: commit token that this result acknowledges, or 0 if
+    /// this result is not a commit acknowledgment.
+    ///
+    /// A non-zero value equals the token returned by a preceding
+    /// PushAudioInputStream::Commit() call. Applications correlate commit
+    /// requests and their acknowledgments via this field.
+    ///
+    /// A Recognized event whose result has CommitToken != 0 and empty Text
+    /// is a pure commit acknowledgment: the service segmented at the commit
+    /// point but produced no recognition content.
+    /// </summary>
+    /// <returns>
+    /// Commit token, or 0 if not a commit acknowledgment.
+    /// </returns>
+    uint32_t CommitToken() const { return m_commitToken; }
+
+    /// <summary>
     /// Collection of additional RecognitionResult properties.
     /// </summary>
     const PropertyCollection& Properties;
@@ -160,6 +177,7 @@ private:
         SPX_THROW_ON_FAIL(hr = result_get_offset(hresult, &m_offset));
         SPX_THROW_ON_FAIL(hr = result_get_duration(hresult, &m_duration));
         SPX_THROW_ON_FAIL(hr = result_get_channel(hresult, &m_channel));
+        SPX_THROW_ON_FAIL(hr = result_get_commit_token(hresult, &m_commitToken));
     }
 
     SPXRESULTHANDLE m_hresult;
@@ -170,6 +188,7 @@ private:
     uint64_t m_offset;
     uint64_t m_duration;
     uint32_t m_channel;
+    uint32_t m_commitToken;
 };
 
 

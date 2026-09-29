@@ -374,6 +374,22 @@ public:
     }
 
     /// <summary>
+    /// Sets the personalized noise suppression model and the license it was issued under.
+    /// </summary>
+    /// <param name="modelPath">Path to the licensed PNS model file.</param>
+    /// <param name="license">The license text embedded in that model. Must match it exactly.</param>
+    /// <remarks>
+    /// Personalized noise suppression requires a licensed model; it will not load without one.
+    /// Setting both values through this method keeps them from being changed independently.
+    /// Reserved for Microsoft first-party applications.
+    /// </remarks>
+    void SetPersonalizedNoiseSuppressionModel(const SPXSTRING& modelPath, const SPXSTRING& license)
+    {
+        SPX_THROW_ON_FAIL(audio_processing_options_set_personalized_noise_suppression_model(
+            m_hoptions, Utils::ToUTF8(modelPath).c_str(), Utils::ToUTF8(license).c_str()));
+    }
+
+    /// <summary>
     /// Sets a property value by name.
     /// </summary>
     /// <param name="name">The property name.</param>

@@ -176,6 +176,36 @@ SPX_INTERFACE(ISpxAudioStreamReader)
     virtual SPXSTRING GetProperty(PropertyId propertyId) { UNUSED(propertyId); return ""; }
     virtual void SetShouldWaitForPendingData(bool shouldWait) { UNUSED(shouldWait); }
     virtual void Close() = 0;
+
+    // Inline commit: pop the next pending commit marker if the reader has
+    // delivered all the audio that precedes it. Returns true
+    // and fills out the token and byte-offset if a marker was popped; false
+    // otherwise. Default: no-op (readers that do not support inline commit).
+    virtual bool PopPendingCommitMarker(uint32_t* /*outToken*/, uint64_t* /*outOffsetBytes*/, bool* /*outHasChannel*/, uint32_t* /*outChannelId*/) { return false; }
+
+    // Inline commit: re-base the byte domain that commit anchors are
+    // expressed in, so that a marker's offsetBytes counts from the start of
+    // the session that is about to consume this reader rather than from the
+    // creation of the stream.
+    //
+    // The session compares a commit's anchor against the audio it has sent on
+    // the current connection, which it counts from zero per session (see
+    // CSpxAudioStreamSession::m_sentAudioOffsetBytes and the audio buffer's
+    // absolute offset). A stream that already carried audio for an earlier
+    // session would otherwise stamp anchors that are larger than that count by
+    // exactly the number of bytes it had already written, and the reconnect
+    // comparisons - the obsolete-commit discard and the re-emission gate -
+    // would both stop working.
+    //
+    // Called by the session at the point it creates the audio buffer the
+    // anchors are measured against, so that both baselines are established
+    // together. It must NOT be called on every pump start: the audio buffer
+    // deliberately survives stop/restart on the same recognizer, and re-basing
+    // without recreating it would reintroduce the same divergence in the
+    // opposite direction.
+    //
+    // Default: no-op (readers that do not support inline commit).
+    virtual void ResetCommitAnchorBase() {}
 };
 
 SPX_INTERFACE(ISpxAudioStreamReaderFactory)
@@ -210,6 +240,37 @@ SPX_INTERFACE(ISpxAudioStreamWriter)
     virtual void Write(uint8_t* buffer, uint32_t size) = 0;
     virtual void SetProperty(PropertyId propertyId, const SPXSTRING& value) = 0;
     virtual void SetProperty(const SPXSTRING& name, const SPXSTRING& value) = 0;
+
+    // Inline commit: queue a commit request anchored at the current write
+    // position. Returns a token that identifies this commit; the token is
+    // reported back on the recognizer's Recognized event via the CommitToken
+    // field on the SpeechRecognitionResult when the service acknowledges the
+    // commit. Default: unsupported.
+    //
+    // The trailing return is unreachable, but it is required. Whether a
+    // compiler can see that SPX_THROW_HR never returns depends on include
+    // order, not on the compiler: SPX_THROW_HR routes to the [[noreturn]]
+    // ThrowWithCallstack only in translation units that reach this header
+    // through spxcore_common.h. Many do not, and there the throw expands to a
+    // plain call with no [[noreturn]], so GCC, Clang and MSVC alike report
+    // the function as falling off the end (-Wreturn-type). In the units that
+    // do see [[noreturn]], the same return becomes unreachable code, which
+    // MSVC reports as C4702. Both are errors under warnings-as-errors, so
+    // keep the return and suppress C4702.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
+    virtual uint32_t Commit() { SPX_THROW_HR(SPXERR_NOT_IMPL); return 0; }
+
+    // Inline commit: same as Commit() but scoped to a single channel of a
+    // multichannel input. The service acknowledges
+    // on the named channel only, still via a Recognized event carrying the
+    // token. Default: unsupported.
+    virtual uint32_t Commit(uint32_t /*channelId*/) { SPX_THROW_HR(SPXERR_NOT_IMPL); return 0; }
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 };
 
 SPX_INTERFACE(ISpxAudioFile)
@@ -690,6 +751,11 @@ SPX_INTERFACE(ISpxRecoEngineAdapter)
     virtual void SendSpeechEventMessage(std::string&&) {};
     virtual void SendNetworkMessage(const char*, std::string&&, const std::shared_ptr<std::promise<bool>>& ) {}
     virtual void SendNetworkMessage(const char*, std::vector<uint8_t>&&, const std::shared_ptr<std::promise<bool>>&) {}
+
+    // Inline commit: send an audio.commit message carrying the app-visible
+    // token via the X-Client-Commit-Token header. Default:
+    // unsupported (adapter has no commit-capable transport).
+    virtual void SendCommit(uint32_t /*token*/, bool /*hasChannel*/, uint32_t /*channelId*/) {}
 };
 
 SPX_INTERFACE(ISpxActivityResultAdapter)
@@ -733,6 +799,15 @@ SPX_INTERFACE(ISpxRecoEngineAdapterSite)
 
     virtual void AdapterRequestingAudioMute(ISpxRecoEngineAdapter* adapter, bool mute) = 0;
     virtual void AdapterCompletedSetFormatStop(ISpxRecoEngineAdapter* adapter) = 0;
+
+    // Inline commit: adapter forwards a service-side acknowledgment of an
+    // audio.commit request. Session pops the matching entry from its
+    // unacknowledged-commits FIFO and fires a Recognized event carrying the
+    // commit token on the SpeechRecognitionResult.
+    // Default: no-op (adapter-site wrappers that do not host an
+    // unacknowledged-commits FIFO simply ignore the signal; only
+    // CSpxAudioStreamSession overrides).
+    virtual void AdapterCommitAcknowledged(ISpxRecoEngineAdapter* /*adapter*/, uint32_t /*token*/, uint64_t /*offset*/, uint64_t /*duration*/) {}
 
     virtual void AdditionalMessage(ISpxRecoEngineAdapter* adapter, uint64_t offset, AdditionalMessagePayload_Type payload) = 0;
 

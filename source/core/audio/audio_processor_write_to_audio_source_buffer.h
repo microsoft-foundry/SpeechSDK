@@ -52,6 +52,7 @@ public:
     // --- ISpxAudioProcessor (overrides)
     void SetFormat(const SPXWAVEFORMATEX* format) override;
     void ProcessAudio(const DataChunkPtr& audioChunk) override;
+    void ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId) override;
 
     // --- ISpxSetErrorInfo (override)
 

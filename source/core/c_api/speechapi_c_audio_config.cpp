@@ -232,6 +232,17 @@ SPXAPI audio_config_set_audio_processing_options(SPXAUDIOCONFIGHANDLE haudioConf
         SPX_THROW_HR_IF(SPXERR_RUNTIME_ERROR, properties == nullptr);
         std::string audioProcessingOptionsJson = audioProcessingOptions->ToJson();
         properties->Set(PropertyId::AudioConfig_AudioProcessingOptions, audioProcessingOptionsJson.c_str());
+
+        // Carried as its own (log-masked) property rather than in the options JSON above,
+        // which is traced verbatim and can be read back by callers.
+        // Always overwrite to avoid keeping a stale license when the new options omit it.
+        std::string pnsLicense;
+        auto optionProperties = SpxQueryInterface<ISpxNamedProperties>(audioProcessingOptions);
+        if (optionProperties != nullptr)
+        {
+            pnsLicense = optionProperties->GetOr(PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelLicense, "");
+        }
+        properties->Set(PropertyId::AudioProcessing_PersonalizedNoiseSuppressionModelLicense, pnsLicense.c_str());
     }
     SPXAPI_CATCH_AND_RETURN_HR(hr);
 }

@@ -36,6 +36,18 @@ SPX_INTERFACE(ISpxAudioProcessor)
 
     virtual void SetFormat(const SPXWAVEFORMATEX* pformat) = 0;
     virtual void ProcessAudio(const DataChunkPtr& audioChunk) = 0;
+
+    // Inline commit: forward a commit-marker delivery. Called by
+    // the audio pump immediately after the ProcessAudio call whose bytes
+    // reached the commit point. token identifies the commit; offsetBytes
+    // is the marker's stored byte position, converted to ticks by the
+    // session via its wave format. hasChannel indicates whether the
+    // commit is scoped to a specific channel.
+    // Default: no-op for processors that are not commit-aware. Note that
+    // a processor sitting between the pump and the session (e.g.
+    // CSpxAudioProcessorWriteToAudioSourceBuffer) must override this to
+    // forward the marker onward, or the commit is silently dropped.
+    virtual void ProcessCommit(uint32_t /*token*/, uint64_t /*offsetBytes*/, bool /*hasChannel*/, uint32_t /*channelId*/) {}
 };
 
 SPX_INTERFACE(ISpxAudioProcessorMinInput)
@@ -68,6 +80,16 @@ SPX_INTERFACE(ISpxAudioSessionShim)
     virtual void StartAudio() = 0;
     virtual void StopAudio() = 0;
     virtual SpxWaveFormatEx GetFormat() = 0;
+
+    // Inline commit: forward a commit marker to the session's audio
+    // processor. The audio pump delivers audio to the session indirectly,
+    // by writing bytes into the audio-source buffer and notifying this
+    // shim, which reads them back out and calls ProcessAudio on the
+    // session (see AudioSourceDataAvailable). A commit marker carries no
+    // bytes, so it cannot travel through that buffer; it is forwarded
+    // along this parallel path instead, preserving the ordering
+    // guarantee because both hops run synchronously on the pump thread.
+    virtual void ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId) = 0;
 };
 
 class ISpxSynthesisResult;

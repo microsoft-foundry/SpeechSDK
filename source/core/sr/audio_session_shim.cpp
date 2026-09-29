@@ -3,6 +3,7 @@
 // Licensed under the MIT license. See LICENSE.md file in the project root for full license information.
 //
 #include "stdafx.h"
+#include <inttypes.h>
 
 #include "audio_session_shim.h"
 #include "property_id_2_name_map.h"
@@ -33,6 +34,24 @@ void CSpxAudioSessionShim::StartAudio()
 void CSpxAudioSessionShim::StopAudio()
 {
     EnsureStopAudioSource();
+}
+
+void CSpxAudioSessionShim::ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId)
+{
+    // Inline commit: hand the commit marker to the session's audio
+    // processor, mirroring how AudioSourceDataAvailable below hands it
+    // audio chunks. Both run synchronously on the pump thread, so the
+    // commit arrives at the session after all audio that precedes it.
+    auto site = GetSite();
+    auto ptr = site->QueryInterface<ISpxAudioProcessor>();
+    if (ptr == nullptr)
+    {
+        SPX_TRACE_ERROR("%s: no audio processor on site; dropping commit token=%" PRIu32, __FUNCTION__, token);
+        return;
+    }
+
+    SPX_DBG_TRACE_VERBOSE("%s: delivering commit token=%" PRIu32 " offsetBytes=%" PRIu64, __FUNCTION__, token, offsetBytes);
+    ptr->ProcessCommit(token, offsetBytes, hasChannel, channelId);
 }
 
 /// <summary>

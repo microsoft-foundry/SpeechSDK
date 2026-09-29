@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <memory>
 #include <set>
 #include <ajv.h>
 
@@ -128,6 +129,19 @@ private:
 
     std::set<std::string> m_activeRequestIds;
     std::string m_speechRequestId;
+
+    // Inline commit: an audio.commit arriving before a turn exists is held
+    // here rather than dropped, and sent once a request id has been
+    // established. A commit issued immediately after recognition starts can
+    // reach this class a millisecond or so before the speech.context message
+    // that creates the id, and dropping it there would make an ordinary call
+    // sequence fail depending on thread timing.
+    //
+    // One slot is enough: commits are rate limited to one per 100 ms per
+    // stream and the window is very short, so a second arrival means the
+    // first is stale. Guarded by nothing - this class is driven from a single
+    // thread through the thread service, like every other member here.
+    std::unique_ptr<Message> m_deferredCommit;
 
     // Temp while collapsing classes.
     std::shared_ptr<ClientConfiguration> m_config;

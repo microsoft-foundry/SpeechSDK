@@ -29,18 +29,21 @@ private:
 
     bool IsTimeout() const;
     static void CheckLoop(std::weak_ptr<SynthesisTimeoutManagement> weakPtr);
+    static int64_t GetMonotonicMilliseconds();
 
 private:
     std::shared_ptr<ISpxThreadService> m_threadService;
     std::function<void(const std::shared_ptr<ISpxErrorInformation> &)> m_timeoutCallback;
     double m_rtf { 0 };
     std::chrono::milliseconds m_frameTimeout { 0 };
-    uint64_t m_hardFrameTimeoutMs { 0 };
+    int64_t m_hardFrameTimeoutMs { 0 };
     std::chrono::milliseconds m_checkInterval;
     std::atomic<int> m_audioDurationMs{ 0 };
 
-    uint64_t m_firstByteTime { 0 };
-    std::atomic<uint64_t> m_lastFrameTime { 0 };
+    // Monotonic (steady_clock) timestamps in milliseconds. Signed on purpose so that an
+    // unexpected backwards clock step can never wrap into a huge unsigned interval.
+    std::atomic<int64_t> m_firstByteTime { 0 };
+    std::atomic<int64_t> m_lastFrameTime { 0 };
     std::atomic<bool> m_stopped { true };
 };
 

@@ -567,6 +567,15 @@ enum class PropertyId
     AudioProcessing_PersonalizedNoiseSuppressionModelPath = 8009,
 
     /// <summary>
+    /// The license text of the personalized noise suppression model used by audio processing.
+    /// A licensed model carries this exact text embedded in the model file, and will not load
+    /// unless the value set here matches it byte for byte.
+    /// Prefer AudioProcessingOptions::SetPersonalizedNoiseSuppressionModel, which sets this and
+    /// the model path together.
+    /// </summary>
+    AudioProcessing_PersonalizedNoiseSuppressionModelLicense = 8010,
+
+    /// <summary>
     /// The file name to write logs.
     /// Added in version 1.4.0.
     /// </summary>

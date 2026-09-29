@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include <queue>
+#include <deque>
 #include <shared_mutex>
 #include <map>
 
@@ -106,6 +106,7 @@ public:
 
     void SetFormat(const SPXWAVEFORMATEX* pformat) override;
     void ProcessAudio(const DataChunkPtr& audioChunk) override;
+    void ProcessCommit(uint32_t token, uint64_t offsetBytes, bool hasChannel, uint32_t channelId) override;
 
     // --- IServiceProvider ---
 
@@ -229,6 +230,7 @@ public:
     void FireConnectionMessageReceived(const std::string& headers, const std::string& path, const uint8_t* buffer, uint32_t bufferSize, bool isBufferBinary) override;
 
     void AdapterCompletedSetFormatStop(ISpxRecoEngineAdapter* /* adapter */) override { AdapterCompletedSetFormatStop(AdapterDoneProcessingAudio::Speech); }
+    void AdapterCommitAcknowledged(ISpxRecoEngineAdapter* adapter, uint32_t token, uint64_t offset, uint64_t duration) override;
     void AdapterRequestingAudioMute(ISpxRecoEngineAdapter* adapter, bool muteAudio) override;
 
     void AdditionalMessage(ISpxRecoEngineAdapter* adapter, uint64_t offset, AdditionalMessagePayload_Type payload) override;
@@ -521,6 +523,96 @@ private:
 
     DetectionProcessorMode m_detectionProcessorMode;
     AudioBufferPtr m_audioBuffer;
+
+    // Inline commit: FIFO of commits that have been issued to the application
+    // but not yet acknowledged by the service. Each entry captures a token
+    // issued by the push stream and the audio anchor offset in bytes.
+    // Manipulated only on the ThreadService Background worker (no lock).
+    // Using std::deque instead of std::queue so entries can be iterated for
+    // reconnect re-emission and log-only teardown discard.
+    //
+    // Note what membership does and does not mean. An entry is appended when a
+    // commit is *issued*, before and independently of whether the audio.commit
+    // message ever reaches the service, and several paths drop the message
+    // without removing the entry: this FIFO at cap (ProcessCommit), no reco
+    // adapter (ProcessCommit), no USP connection or a connection in a state
+    // that cannot send (usp_reco_engine_adapter.cpp), and MAS enabled
+    // (audio_pump.cpp, where markers are discarded before forwarding).
+    //
+    // So this is not a record of commits in flight, and its size is not a
+    // measure of outstanding network traffic. It is the set of tokens handed
+    // to the application for which no acknowledgment has yet been matched -
+    // which is the right basis for matching an incoming ACK and for re-emission
+    // across a reconnect, and is why the cap below is a defensive bound rather
+    // than a flow-control window. The name says "unacknowledged" rather than
+    // "pending" for exactly this reason.
+    //
+    // The anchor is held in bytes, the unit the push stream records it in, so
+    // that every comparison against the sent-audio frontier is an exact
+    // byte-to-byte test.
+    struct UnacknowledgedCommit
+    {
+        uint32_t token;
+        uint64_t offsetBytes;
+        // Channel scope of the commit.
+        // hasChannel=false means "all channels" (no channel-index header on
+        // the wire); hasChannel=true scopes to channelId.
+        bool hasChannel;
+        uint32_t channelId;
+        // Reconnect: set to true when the session is rewound
+        // (AdapterStoppedTurn with retry=true) and cleared when the
+        // commit is re-emitted on the fresh connection.
+        bool needsResend { false };
+    };
+
+    // Inline commit: defensive cap on the unacknowledged-commits FIFO.
+    // Safety net against unbounded accumulation under silent-drop services
+    // or unusual traffic patterns. Enforced silently at marker arrival:
+    // if reached, the new marker is discarded with SPX_TRACE_ERROR and no
+    // audio.commit is sent. The token returned by Commit() becomes one
+    // that never produces a Recognized event with CommitToken != 0.
+    static constexpr size_t kMaxUnacknowledgedCommits = 64;
+    std::deque<UnacknowledgedCommit> m_unacknowledgedCommits;
+
+    // Inline commit: absolute offset, in bytes, of the audio handed to the
+    // adapter so far on the current connection. Set at the start of each turn
+    // to the point replay resumes from, then advanced by each chunk sent.
+    //
+    // This is deliberately distinct from the audio buffer's absolute offset,
+    // which is the frontier the service has confirmed and advances only when
+    // audio is acknowledged. Placing a re-emitted commit correctly requires
+    // knowing how much audio has been *sent* on this connection, not how much
+    // has been confirmed.
+    //
+    // Counted in bytes so that advancing it is exact addition of chunk sizes,
+    // with no per-chunk rounding and no accumulated drift, and so that it is
+    // directly comparable to UnacknowledgedCommit::offsetBytes.
+    uint64_t m_sentAudioOffsetBytes = 0;
+
+    // Inline commit: the audio continuation offset in bytes, i.e. the point
+    // replay resumes from, captured at the same moment as
+    // m_currentTurnGlobalOffset but in the byte domain.
+    //
+    // This exists so the obsolete-commit test in AdapterStoppedTurn can be a
+    // byte-to-byte comparison without reinterpreting m_currentTurnGlobalOffset,
+    // which is shared with non-commit turn management (it feeds the
+    // "no progress in the last turn" audio-drop decision) and must stay in
+    // ticks.
+    uint64_t m_currentTurnGlobalOffsetBytes = 0;
+
+    // Inline commit: the push stream feeding this session, retained only so
+    // that its commit-anchor baseline can be re-based when the audio buffer is
+    // created (see ResetStreamCommitAnchorBase).
+    //
+    // Set only when audio is taken directly from the stream, which is exactly
+    // the configuration in which inline commit is supported: a codec adapter or
+    // the compressed passthrough adapter sits in between otherwise, and commit
+    // is rejected at the API for those formats. It is therefore null precisely
+    // when there is no commit path to keep aligned.
+    std::weak_ptr<ISpxAudioStreamReader> m_commitAnchorReader;
+
+    void ResetStreamCommitAnchorBase();
+
     DataChunkPtr m_replayBuffer;
     AudioStreamSessionThrottleLogicPtr m_throttleLogic;
 
