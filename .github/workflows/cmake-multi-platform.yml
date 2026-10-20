@@ -44,7 +44,7 @@ jobs:
             build_arch: x64
             dynlib_ext: .dll
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
     - name: Run repository checks
       run: |
         ./scripts/check-git-head.sh
@@ -157,7 +157,7 @@ jobs:
             cp "$i" $_artifact/logs/
           fi
         done
-    - uses: actions/upload-artifact@v6
+    - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
       with:
         name: SpeechSDK-${{ env.SPEECHSDK_VERSION }}-${{ matrix.build_os }}-${{ matrix.build_arch }}
         path: artifact
