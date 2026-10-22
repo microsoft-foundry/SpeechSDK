@@ -4,11 +4,15 @@
 //
 
 // <code>
+#include <atomic>
 #include <chrono>
+#include <future>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <locale>
+#include <mutex>
+#include <stdexcept>
 #include <sstream>
 
 #include <speechapi_cxx.h>
@@ -18,6 +22,21 @@ using namespace Microsoft::CognitiveServices::Speech::Audio;
 using namespace Microsoft::CognitiveServices::Speech::Diagnostics::Logging;
 using namespace Microsoft::CognitiveServices::Speech::Translation;
 
+
+constexpr int MAX_WAIT_FOR_RESULT_SECONDS = 30;
+
+struct RecognitionState
+{
+    std::promise<void> completion;
+    std::once_flag completed;
+    std::atomic<bool> failed{false};
+    std::atomic<bool> hasResult{false};
+
+    void Complete()
+    {
+        std::call_once(completed, [this]() { completion.set_value(); });
+    }
+};
 
 // Get a current timestamp.
 static const std::string CurrentTime(const std::string& format)
@@ -124,7 +143,7 @@ void RecognizeSpeech(
     // Create an instance of a speech recognizer with the given configs.
     auto recognizer = SpeechRecognizer::FromConfig(speechConfig, audioConfig);
 
-    std::promise<void> recognitionEnd;
+    auto state = std::make_shared<RecognitionState>();
 
     // Subscribe to events.
     recognizer->Recognizing.Connect([](const SpeechRecognitionEventArgs& e)
@@ -137,7 +156,7 @@ void RecognizeSpeech(
         }
     });
 
-    recognizer->Recognized.Connect([](const SpeechRecognitionEventArgs& e)
+    recognizer->Recognized.Connect([state](const SpeechRecognitionEventArgs& e)
     {
         if (e.Result->Reason == ResultReason::RecognizedSpeech)
         {
@@ -148,6 +167,11 @@ void RecognizeSpeech(
                 << " [ " << e.Result->Offset() / 10000 << " + " << e.Result->Duration() / 10000
                 << " = " << (e.Result->Offset() + e.Result->Duration()) / 10000 << " ms ]"
                 << std::endl;
+
+            if (!e.Result->Text.empty())
+            {
+                state->hasResult = true;
+            }
         }
         else if (e.Result->Reason == ResultReason::NoMatch)
         {
@@ -161,7 +185,7 @@ void RecognizeSpeech(
         }
     });
 
-    recognizer->Canceled.Connect([](const SpeechRecognitionCanceledEventArgs& e)
+    recognizer->Canceled.Connect([state](const SpeechRecognitionCanceledEventArgs& e)
     {
         std::cout << CurrentTime() << " "
             << "CANCELED: Reason=" << (e.Reason == CancellationReason::EndOfStream ? "EndOfStream" : "Error");
@@ -170,8 +194,10 @@ void RecognizeSpeech(
         {
             // NOTE: In case of an error, do not try using the same recognizer instance anymore.
             std::cout << " ErrorCode=" << (int)e.ErrorCode << " ErrorDetails=" << e.ErrorDetails;
+            state->failed = true;
         }
         std::cout << std::endl;
+        state->Complete();
     });
 
     recognizer->SpeechStartDetected.Connect([](const RecognitionEventArgs& e)
@@ -192,11 +218,11 @@ void RecognizeSpeech(
             << "SESSION STARTED: SessionId=" << e.SessionId << std::endl;
     });
 
-    recognizer->SessionStopped.Connect([&recognitionEnd](const SessionEventArgs& e)
+    recognizer->SessionStopped.Connect([state](const SessionEventArgs& e)
     {
         std::cout << CurrentTime() << " "
             << "SESSION STOPPED: SessionId=" << e.SessionId << std::endl;
-        recognitionEnd.set_value();
+        state->Complete();
     });
 
     // The following lines run continuous recognition that listens for speech
@@ -207,8 +233,21 @@ void RecognizeSpeech(
     // auto result = recognizer->RecognizeOnceAsync().get();
 
     recognizer->StartContinuousRecognitionAsync().get();
-    recognitionEnd.get_future().get();
+    const bool completed = state->completion.get_future().wait_for(std::chrono::seconds(MAX_WAIT_FOR_RESULT_SECONDS)) == std::future_status::ready;
     recognizer->StopContinuousRecognitionAsync().get();
+
+    if (!completed)
+    {
+        throw std::runtime_error("Recognition timed out");
+    }
+    if (state->failed)
+    {
+        throw std::runtime_error("Recognition failed");
+    }
+    if (!state->hasResult)
+    {
+        throw std::runtime_error("Recognition produced no final result");
+    }
 }
 
 
@@ -268,11 +307,22 @@ void SynthesizeSpeech(
 
     // Synthesize speech and wait for the result.
     auto resultFuture = synthesizer->SpeakTextAsync(inputText);
+    if (resultFuture.wait_for(std::chrono::seconds(MAX_WAIT_FOR_RESULT_SECONDS)) != std::future_status::ready)
+    {
+        throw std::runtime_error("Synthesis timed out");
+    }
     auto result = resultFuture.get();
 
     // Check the result.
+    bool hasResult = false;
     if (result->Reason == ResultReason::SynthesizingAudioCompleted)
     {
+        if (result->GetAudioLength() == 0)
+        {
+            throw std::runtime_error("Synthesis produced no audio");
+        }
+        hasResult = true;
+
         std::cout << CurrentTime() << " "
             << "SYNTHESIZED speech for text \"" << inputText << "\"" << std::endl;
         auto audioDataStream = AudioDataStream::FromResult(result);
@@ -317,6 +367,11 @@ void SynthesizeSpeech(
         }
         std::cout << std::endl;
     }
+
+    if (!hasResult)
+    {
+        throw std::runtime_error("Synthesis failed");
+    }
 }
 
 
@@ -350,7 +405,7 @@ void TranslateSpeech(
     // Create an instance of a translation recognizer with the given configs.
     auto recognizer = TranslationRecognizer::FromConfig(speechConfig, audioConfig);
 
-    std::promise<void> recognitionEnd;
+    auto state = std::make_shared<RecognitionState>();
 
     // Subscribe to events.
     recognizer->Recognizing.Connect([](const TranslationRecognitionEventArgs& e)
@@ -368,7 +423,7 @@ void TranslateSpeech(
             }
         });
 
-    recognizer->Recognized.Connect([](const TranslationRecognitionEventArgs& e)
+    recognizer->Recognized.Connect([state, targetLanguage](const TranslationRecognitionEventArgs& e)
         {
             if (e.Result->Reason == ResultReason::TranslatedSpeech)
             {
@@ -385,6 +440,12 @@ void TranslateSpeech(
                     std::cout << CurrentTime() << " "
                         << "TRANSLATED:  [" << pair.first << "] " << pair.second << std::endl;
                 }
+
+                const auto translation = e.Result->Translations.find(targetLanguage);
+                if (!e.Result->Text.empty() && translation != e.Result->Translations.end() && !translation->second.empty())
+                {
+                    state->hasResult = true;
+                }
             }
             else if (e.Result->Reason == ResultReason::NoMatch)
             {
@@ -398,7 +459,7 @@ void TranslateSpeech(
             }
         });
 
-    recognizer->Canceled.Connect([](const TranslationRecognitionCanceledEventArgs& e)
+    recognizer->Canceled.Connect([state](const TranslationRecognitionCanceledEventArgs& e)
         {
             std::cout << CurrentTime() << " "
                 << "CANCELED: Reason=" << (e.Reason == CancellationReason::EndOfStream ? "EndOfStream" : "Error");
@@ -407,8 +468,10 @@ void TranslateSpeech(
             {
                 // NOTE: In case of an error, do not try using the same recognizer instance anymore.
                 std::cout << " ErrorCode=" << (int)e.ErrorCode << " ErrorDetails=" << e.ErrorDetails;
+                state->failed = true;
             }
             std::cout << std::endl;
+            state->Complete();
         });
 
     recognizer->SpeechStartDetected.Connect([](const RecognitionEventArgs& e)
@@ -429,11 +492,11 @@ void TranslateSpeech(
                 << "SESSION STARTED: SessionId=" << e.SessionId << std::endl;
         });
 
-    recognizer->SessionStopped.Connect([&recognitionEnd](const SessionEventArgs& e)
+    recognizer->SessionStopped.Connect([state](const SessionEventArgs& e)
         {
             std::cout << CurrentTime() << " "
                 << "SESSION STOPPED: SessionId=" << e.SessionId << std::endl;
-            recognitionEnd.set_value();
+            state->Complete();
         });
 
     // The following lines run continuous recognition that listens for speech
@@ -444,8 +507,21 @@ void TranslateSpeech(
     // auto result = recognizer->RecognizeOnceAsync().get();
 
     recognizer->StartContinuousRecognitionAsync().get();
-    recognitionEnd.get_future().get();
+    const bool completed = state->completion.get_future().wait_for(std::chrono::seconds(MAX_WAIT_FOR_RESULT_SECONDS)) == std::future_status::ready;
     recognizer->StopContinuousRecognitionAsync().get();
+
+    if (!completed)
+    {
+        throw std::runtime_error("Translation timed out");
+    }
+    if (state->failed)
+    {
+        throw std::runtime_error("Translation failed");
+    }
+    if (!state->hasResult)
+    {
+        throw std::runtime_error("Translation produced no final result");
+    }
 }
 
 
@@ -514,9 +590,10 @@ static const char* getEnvVar(const char* var)
 {
 #pragma warning(suppress : 4996) // getenv
     const char* val = getenv(var);
-    if (val == nullptr)
+    if (val == nullptr || *val == '\0')
     {
         fprintf(stderr, "Environment variable not set: %s\n", var);
+        return nullptr;
     }
     return val;
 }
@@ -574,7 +651,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (inputFile.empty() && inputText.empty())
+    if ((command == "synthesize" && inputText.empty()) || (command != "synthesize" && inputFile.empty()))
     {
         ShowUsage("No input specified!");
         return 2;

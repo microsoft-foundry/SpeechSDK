@@ -1,0 +1,181 @@
+name: Build and test SDK
+description: Shared platform build, selected core tests, samples, and failure logs.
+inputs:
+  source:
+    description: Candidate checkout directory
+    default: work
+  test-lane:
+    description: offline, online, or all
+    required: true
+  build-os:
+    description: Platform name
+    required: true
+  build-arch:
+    description: Architecture
+    required: true
+  dynlib-ext:
+    description: Shared library extension
+    required: true
+  build-type:
+    description: Build configuration
+    default: Release
+  service-region:
+    description: Speech service region, for online tests only
+    default: ''
+  subscription-key:
+    description: Speech subscription key, for online tests only
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Run repository checks
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        ./scripts/check-git-head.sh
+    - name: Set SDK version
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        _version=$(head -n 1 version.txt)
+        echo "SPEECHSDK_VERSION=$_version" >> $GITHUB_ENV
+    - name: Install build dependencies
+      if: inputs.build-os == 'Linux'
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        # Install necessary packages not found on the runner image by default
+        sudo apt-get update
+        sudo apt-get install uuid-dev
+    - name: Configure build
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        if [[ "${{ inputs.build-os }}" == "Windows" ]]; then
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ inputs.build-type }} -DSPEECHSDK_VERSION=${{ env.SPEECHSDK_VERSION }}
+        else
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=${{ inputs.build-type }} -DSPEECHSDK_VERSION=${{ env.SPEECHSDK_VERSION }}
+        fi
+    - name: Build SDK binaries
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        if [[ "${{ inputs.build-os }}" == "Windows" ]]; then
+          cmake --build build --config ${{ inputs.build-type }} -- -maxcpucount
+        else
+          ninja -C build
+          strip -x build/lib/*${{ inputs.dynlib-ext }}
+        fi
+    - name: Collect build artifacts
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        _artifact=artifact/SpeechSDK
+        # Store the artifact path in environment
+        echo "ARTIFACT_DIR=$_artifact" >> $GITHUB_ENV
+        # Copy SDK binaries
+        mkdir -p $_artifact/lib
+        if [[ "${{ inputs.build-os }}" == "Windows" ]]; then
+          mkdir -p $_artifact/bin
+          cp -v ./build/bin/${{ inputs.build-type }}/Microsoft.*.{dll,pdb} $_artifact/bin/
+          cp -v ./build/lib/${{ inputs.build-type }}/Microsoft.*.lib $_artifact/lib/
+        else
+          cp -v ./build/lib/*${{ inputs.dynlib-ext }} $_artifact/lib/
+        fi
+        # Copy public API headers
+        mkdir -p $_artifact/include/{c_api,cxx_api}
+        cp ./source/public/c_api/*.h $_artifact/include/c_api/
+        cp ./source/public/cxx_api/*.h $_artifact/include/cxx_api/
+    - name: Run core tests
+      id: run-core-tests
+      env:
+        CORE_TESTS_STDERR: core_tests-stderr.log
+        SPEECH_SERVICE_REGION: ${{ inputs.service-region }}
+        SPEECH_SUBSCRIPTION_KEY: ${{ inputs.subscription-key }}
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        if [[ '${{ inputs.test-lane }}' == 'offline' ]]; then
+          filter='~[online]~[tls]~[.]'
+        elif [[ '${{ inputs.test-lane }}' == 'online' ]]; then
+          filter='[online]~[tls]~[.]'
+        else
+          filter='~[tls]~[.]'
+        fi
+        echo "CORE_TESTS_STDERR=${{ env.CORE_TESTS_STDERR }}" >> $GITHUB_ENV
+        if [[ "${{ inputs.build-os }}" == "Windows" ]]; then
+          if [[ '${{ inputs.test-lane }}' != 'offline' ]]; then ./scripts/create-test-subscriptions-regions-json.sh ./build/bin/${{ inputs.build-type }}/test.subscriptions.regions.json; fi
+          ./build/bin/${{ inputs.build-type }}/core_tests.exe --inputDir tests/input --durations yes "$filter" 2>${{ env.CORE_TESTS_STDERR }}
+        else
+          if [[ "${{ inputs.build-os }}" == "Linux" ]]; then
+            export LD_LIBRARY_PATH=$PWD/build/lib:$LD_LIBRARY_PATH
+          else
+            export DYLD_LIBRARY_PATH=$PWD/build/lib:$DYLD_LIBRARY_PATH
+          fi
+          if [[ '${{ inputs.test-lane }}' != 'offline' ]]; then ./scripts/create-test-subscriptions-regions-json.sh ./build/bin/test.subscriptions.regions.json; fi
+          ./build/bin/core_tests --inputDir tests/input --durations yes "$filter" 2>${{ env.CORE_TESTS_STDERR }}
+        fi
+      continue-on-error: true
+    - name: Run samples
+      if: inputs.test-lane != 'offline'
+      id: run-samples
+      env:
+        SPEECH_SERVICE_REGION: ${{ inputs.service-region }}
+        SPEECH_SUBSCRIPTION_KEY: ${{ inputs.subscription-key }}
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        # Copy 'SpeechSDK' artifact directory under samples
+        cp -a ${{ env.ARTIFACT_DIR }} samples/
+        # Build the SDK demo
+        cd samples
+        cmake -B build -DCMAKE_BUILD_TYPE=${{ inputs.build-type }}
+        cmake --build build --config ${{ inputs.build-type }}
+        if [[ "${{ inputs.build-os }}" == "Windows" ]]; then
+          _sdkdemo=./build/sdkdemo/Release/sdkdemo.exe
+        else
+          _sdkdemo=./build/sdkdemo/sdkdemo
+        fi
+        echo "### Recognize speech in English"
+        $_sdkdemo recognize -file data/english.pcm
+        echo "### Recognize speech in German"
+        $_sdkdemo recognize -file data/german.pcm -locale de-DE
+        echo "### Synthesize speech in English"
+        $_sdkdemo synthesize -text "What's the weather like?"
+        echo "### Synthesize speech in German"
+        $_sdkdemo synthesize -text "Wie ist das Wetter?" -locale de-DE
+        echo "### Translate English to German"
+        $_sdkdemo translate -file data/english.pcm -targetLang de
+        echo "### Translate German to English"
+        $_sdkdemo translate -file data/german.pcm -locale de-DE -targetLang en
+      continue-on-error: true
+    - name: Collect logs
+      if: steps.run-core-tests.outcome == 'failure' || steps.run-samples.outcome == 'failure'
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        _artifact=${{ env.ARTIFACT_DIR }}
+        mkdir -p $_artifact/logs
+        # Copy logs from tests
+        if [[ -s ${{ env.CORE_TESTS_STDERR }} ]]; then
+          cp ${{ env.CORE_TESTS_STDERR }} $_artifact/logs/
+        fi
+        # Copy logs from samples
+        for i in samples/*.log ; do
+          if [[ -s "$i" ]]; then
+            cp "$i" $_artifact/logs/
+          fi
+        done
+    - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      with:
+        name: SpeechSDK-${{ env.SPEECHSDK_VERSION }}-${{ inputs.build-os }}-${{ inputs.build-arch }}
+        path: ${{ inputs.source }}/artifact
+        if-no-files-found: error
+        retention-days: 1
+    - name: Check job status
+      if: steps.run-core-tests.outcome == 'failure' || steps.run-samples.outcome == 'failure'
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      run: |
+        echo "There were test failures! Check the logs."
+        exit 1

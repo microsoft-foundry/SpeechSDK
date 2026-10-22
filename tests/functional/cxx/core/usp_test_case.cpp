@@ -92,7 +92,7 @@ private:
 
 using UspClientPtr = std::shared_ptr<UspClient>;
 
-SPXTEST_CASE_BEGIN("USP is properly functioning", "[usp]")
+SPXTEST_CASE_BEGIN("USP is properly functioning", "[usp][online]")
 {
     SPXTEST_SECTION("usp can be initialized, connected and closed")
     {

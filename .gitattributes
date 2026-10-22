@@ -27,6 +27,7 @@ setup_speech.cfg text
 *.bat text
 *.bats text
 *.c text
+*.cjs text
 *.cmake text
 *.cmd text
 *.conf text

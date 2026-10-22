@@ -1,0 +1,13 @@
+# Review notification for fork PRs.
+# Completion wakes the approved PR workflow, which independently verifies current approval.
+name: PR review notification
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+permissions: {}
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Notify approved PR workflow
+        run: echo 'Review state changed; the approved PR workflow will query current approval.'
