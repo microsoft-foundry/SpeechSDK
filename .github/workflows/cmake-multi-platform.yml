@@ -40,7 +40,6 @@ jobs:
 
   main:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    name: test-${{ matrix.os }}
     environment: speech-ci
     runs-on: ${{ matrix.runner }}
     strategy:
