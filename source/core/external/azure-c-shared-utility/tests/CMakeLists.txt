@@ -44,6 +44,15 @@ endif()
 #however, because of the setup involved, they are restricted to Linux
 if(${use_openssl})
 add_subdirectory(x509_openssl_ut)
+add_subdirectory(tlsio_openssl_ut)
+endif()
+
+if(WIN32 AND use_schannel AND use_openssl)
+    option(run_isolated_schannel_ipv6_tests
+        "Run Schannel IPv6 certificate tests only on a disposable Windows test user/runner" OFF)
+    if(run_isolated_schannel_ipv6_tests)
+        add_subdirectory(tlsio_schannel_ipv6_ut)
+    endif()
 endif()
 
 add_subdirectory(string_tokenizer_ut)
@@ -53,6 +62,7 @@ add_subdirectory(tlsio_options_ut)
 add_subdirectory(uniqueid_ut)
 add_subdirectory(uuid_ut)
 add_subdirectory(urlencode_ut)
+add_subdirectory(host_utils_ut)
 add_subdirectory(vector_ut)
 add_subdirectory(xio_ut)
 add_subdirectory(optionhandler_ut)

@@ -122,13 +122,15 @@ int32_t WinRtHttpAdapter::OpenHttpConnection(
     const char* proxyHost,
     int proxyPort,
     const char* proxyUserName,
-    const char* proxyPassword)
+    const char* proxyPassword,
+    bool enableIpv6)
 {
     SPX_TRACE_SCOPE(__FUNCTION__, __FUNCTION__);
     (void)proxyHost;
     (void)proxyPort;
     (void)proxyUserName;
     (void)proxyPassword;
+    (void)enableIpv6;
     SPX_TRACE_INFO(R"(Using WinRtHttpAdapter: 0x%x)", this);
     if (m_state != WinRtHttpAdapterState::Initialized)
     {

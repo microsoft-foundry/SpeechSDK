@@ -219,11 +219,11 @@ void HTTPAPI_Deinit(void)
 /*Codes_SRS_HTTPAPI_COMPACT_21_010: [ The HTTPAPI_CreateConnection shall create an http connection to the host specified by the hostName parameter. ]*/
 HTTP_HANDLE HTTPAPI_CreateConnection(const char* hostName)
 {
-    return HTTPAPI_CreateConnection_Advanced(hostName, 443, true, NULL, 0, NULL, NULL);
+    return HTTPAPI_CreateConnection_Advanced(hostName, 443, true, NULL, 0, NULL, NULL, false);
 }
 
 /*Codes_SRS_HTTPAPI_COMPACT_21_011: [ The HTTPAPI_CreateConnection_Advanced shall create an http connection to the host specified by the hostName/port/secure parameter with proxy supported. ]*/
-HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bool secure, const char* proxyHost, int proxyPort, const char* proxyUsername, const char*proxyPassword)
+HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bool secure, const char* proxyHost, int proxyPort, const char* proxyUsername, const char*proxyPassword, bool enable_ipv6)
 {
     HTTP_HANDLE_DATA* http_instance;
 
@@ -256,6 +256,7 @@ HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bo
                 tlsio_config.port = port;
                 tlsio_config.underlying_io_interface = NULL;
                 tlsio_config.underlying_io_parameters = NULL;
+                tlsio_config.enable_ipv6 = enable_ipv6 ? 1 : 0;
 
                 HTTP_PROXY_IO_CONFIG proxy_config;
                 if (proxyHost != NULL && strlen(proxyHost) > 0)
@@ -275,6 +276,7 @@ HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bo
                         proxy_config.proxy_port = proxyPort;
                         proxy_config.username = proxyUsername;
                         proxy_config.password = proxyPassword;
+                        proxy_config.enable_ipv6 = enable_ipv6 ? 1 : 0;
 
                         tlsio_config.underlying_io_parameters = &proxy_config;
                     }
@@ -291,6 +293,7 @@ HTTP_HANDLE HTTPAPI_CreateConnection_Advanced(const char* hostName, int port, bo
                 socketio_config.hostname = hostName;
                 socketio_config.port = port;
                 socketio_config.accepted_socket = NULL;
+                socketio_config.enable_ipv6 = enable_ipv6 ? 1 : 0;
 
                 http_instance->xio_handle = xio_create(socketio_get_interface_description(), (void*)&socketio_config);
             }

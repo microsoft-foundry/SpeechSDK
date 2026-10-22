@@ -8,6 +8,8 @@
 #include "ispxinterfaces.h"
 #include "interface_helpers.h"
 #include "speechapi_cxx_audio_stream_format.h"
+#include <mutex>
+#include <thread>
 
 using namespace Microsoft::CognitiveServices::Speech::Audio;
 
@@ -69,7 +71,22 @@ private:
     ISpxAudioStreamWriterInitCallbacks::CloseCallbackFunction_Type m_writerCloseCallback;
     GetPropertyCallbackFunction_Type2 m_getPropertyCallback;
 
+    // Thread-safe setter for m_errorMessage; used by the decoder worker and SetFormat().
+    void SetError(const std::string& message);
+
+    // Last error reported by the decoder worker; delivered to the owner by Read().
+    // Guarded by m_errorMutex.
     std::string m_errorMessage;
+    // Protects m_errorMessage (worker writes, owner reads).
+    std::mutex m_errorMutex;
+    // Serializes Close() calls from owner threads. Never taken from the worker thread: Close()
+    // rejects that case first, because an owner may hold this mutex while joining the worker.
+    std::mutex m_closeMutex;
+    // Set by the first Close(); polled by the worker to leave its decode loop.
+    std::atomic_bool m_stopRequested{false};
+    // The decoder thread. Owned by this object: started in SetFormat(), joined in Close() (and
+    // therefore in the destructor). Never detached.
+    std::thread m_worker;
 
     std::atomic_bool m_isThrottlingEnabled{false};
 };

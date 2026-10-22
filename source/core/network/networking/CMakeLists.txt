@@ -69,3 +69,8 @@ target_link_libraries(${PROJECT_NAME}
         common
         network_util
 )
+
+# InetPtonA, used to validate IPv6 literals in http_utils.cpp, lives in ws2_32.
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
+endif()

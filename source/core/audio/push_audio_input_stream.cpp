@@ -23,6 +23,8 @@ namespace CognitiveServices {
 namespace Speech {
 namespace Impl {
 
+constexpr int CSpxPushAudioInputStream::kCommitMinIntervalMs;
+
 CSpxPushAudioInputStream::CSpxPushAudioInputStream() :
     m_bytesInBuffer(0),
     m_ptrIntoBuffer(nullptr),

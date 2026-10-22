@@ -343,6 +343,7 @@ namespace Impl {
         webSocketConfiguration.port = port;
         webSocketConfiguration.relative_path = pathAndQuery;
         webSocketConfiguration.use_ssl = endpoint.IsSecure();
+        webSocketConfiguration.enable_ipv6 = endpoint.IsIpv6Enabled() ? 1 : 0;
         webSocketConfiguration.protocol_name = protocolCount > 0 ? wsProto.protocol : "";
         webSocketConfiguration.protocol_count = protocolCount;
         if (!proxy.host.empty())
@@ -612,9 +613,9 @@ namespace Impl {
             .count();
 
         SPX_TRACE_VERBOSE("[%p] Web socket sending message. Time: %s, TimeInQueue: %" PRIi64 "ms, %s",
-            (void*)this, 
-            timestamp.c_str(), 
-            timeInQueueMs, 
+            (void*)this,
+            timestamp.c_str(),
+            timeInQueueMs,
             item.Message()->LogDescription().c_str());
 
         // reset the queued time so we can use it to measure how long it took to send the message
@@ -994,8 +995,8 @@ namespace Impl {
             m_connectionTime = get_epoch_time();
 
             SPX_TRACE_INFO("Opening websocket completed. TransportRequest: [%p], wsio handle: 0x%p, time: %s",
-                (void*)this, 
-                (void*)m_webSocket.get(), 
+                (void*)this,
+                (void*)m_webSocket.get(),
                 utcTimestamp.c_str());
 
             // Set underlying IO options on the connection is connected.

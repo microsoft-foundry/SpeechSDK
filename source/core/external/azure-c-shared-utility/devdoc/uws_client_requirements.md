@@ -76,8 +76,8 @@ typedef struct WS_PROTOCOL_TAG
     const char* protocol;
 } WS_PROTOCOL;
 
-MOCKABLE_FUNCTION(, UWS_CLIENT_HANDLE, uws_client_create, const char*, hostname, unsigned int, port, const char*, resource_name, bool, use_ssl, const WS_PROTOCOL*, protocols, size_t, protocol_count);
-MOCKABLE_FUNCTION(, UWS_CLIENT_HANDLE, uws_client_create_with_io, const IO_INTERFACE_DESCRIPTION*, io_interface, void*, io_create_parameters, const char*, hostname, unsigned int, port, const char*, resource_name, const WS_PROTOCOL*, protocols, size_t, protocol_count);
+MOCKABLE_FUNCTION(, UWS_CLIENT_HANDLE, uws_client_create, const char*, hostname, unsigned int, port, const char*, resource_name, bool, use_ssl, const WS_PROTOCOL*, protocols, size_t, protocol_count, bool, enable_ipv6);
+MOCKABLE_FUNCTION(, UWS_CLIENT_HANDLE, uws_client_create_with_io, const IO_INTERFACE_DESCRIPTION*, io_interface, void*, io_create_parameters, const char*, hostname, unsigned int, port, const char*, resource_name, const WS_PROTOCOL*, protocols, size_t, protocol_count, bool, enable_ipv6);
 MOCKABLE_FUNCTION(, void, uws_client_destroy, UWS_CLIENT_HANDLE, uws_client);
 MOCKABLE_FUNCTION(, int, uws_client_open_async, UWS_CLIENT_HANDLE, uws_client, ON_WS_OPEN_COMPLETE, on_ws_open_complete, void*, on_ws_open_complete_context, ON_WS_FRAME_RECEIVED, on_ws_frame_received, void*, on_ws_frame_received_context, ON_WS_PEER_CLOSED, on_ws_peer_closed, void*, on_ws_peer_closed_context, ON_WS_ERROR, on_ws_error, void*, on_ws_error_context);
 MOCKABLE_FUNCTION(, int, uws_client_close_async, UWS_CLIENT_HANDLE, uws_client, ON_WS_CLOSE_COMPLETE, on_ws_close_complete, void*, on_ws_close_complete_context);
@@ -92,8 +92,10 @@ MOCKABLE_FUNCTION(, OPTIONHANDLER_HANDLE, uws_client_retrieve_options, UWS_CLIEN
 ### uws_client_create
 
 ```c
-extern UWS_CLIENT_HANDLE uws_client_create(const char* hostname, unsigned int port, const char* resource_name, bool use_ssl, const WS_PROTOCOL* protocols, size_t protocol_count);
+extern UWS_CLIENT_HANDLE uws_client_create(const char* hostname, unsigned int port, const char* resource_name, bool use_ssl, const WS_PROTOCOL* protocols, size_t protocol_count, bool enable_ipv6);
 ```
+
+`enable_ipv6` configures the socket and TLS IO before the connection opens. Passing `false` preserves the platform's default address selection.
 
 XX**SRS_UWS_CLIENT_01_001: [** `uws_client_create` shall create an instance of uws and return a non-NULL handle to it.**]**  
 XX**SRS_UWS_CLIENT_01_002: [** If any of the arguments `hostname` and `resource_name` is NULL then `uws_client_create` shall return NULL. **]**  
@@ -129,6 +131,8 @@ XX**SRS_UWS_CLIENT_01_018: [** If `singlylinkedlist_create` fails then `uws_clie
 ```c
 UWS_CLIENT_HANDLE uws_client_create_with_io(const IO_INTERFACE_DESCRIPTION* io_interface, void* io_create_parameters, const char* hostname, unsigned int port, const char* resource_name, const WS_PROTOCOL* protocols, size_t protocol_count)
 ```
+
+The caller configures the supplied IO when creating it. For proxy IO, `HTTP_PROXY_IO_CONFIG.enable_ipv6` controls the socket created for the proxy connection.
 
 XX**SRS_UWS_CLIENT_01_515: [** `uws_client_create_with_io` shall create an instance of uws and return a non-NULL handle to it. **]**  
 XX**SRS_UWS_CLIENT_01_516: [** If any of the arguments `io_interface`, `hostname` and `resource_name` is NULL then `uws_client_create_with_io` shall return NULL. **]**  

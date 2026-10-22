@@ -55,7 +55,8 @@ void UwsWebSocket::Initialize(const WebSocketConfiguration& configuration, void*
         configuration.relative_path.c_str(),
         configuration.use_ssl,
         configuration.protocol_count > 0 ? &wsProto : nullptr,
-        configuration.protocol_count);
+        configuration.protocol_count,
+        configuration.enable_ipv6 != 0);
     if (!m_webSocketHandle)
     {
         SPX_TRACE_ERROR("Failed to create web socket");
@@ -81,6 +82,7 @@ void UwsWebSocket::Initialize(const WebSocketConfiguration& configuration, const
     proxyConfig.proxy_port = proxy_configuration.port;
     proxyConfig.username = proxy_configuration.username.c_str();
     proxyConfig.password = proxy_configuration.password.c_str();
+    proxyConfig.enable_ipv6 = configuration.enable_ipv6;
     void* underlyingIOParameters = &proxyConfig;
     const IO_INTERFACE_DESCRIPTION* underlyingIOInterface = http_proxy_io_get_interface_description();
     if (underlyingIOInterface == nullptr)
@@ -97,6 +99,7 @@ void UwsWebSocket::Initialize(const WebSocketConfiguration& configuration, const
             tlsioConfig.port = proxyConfig.port;
             tlsioConfig.underlying_io_interface = underlyingIOInterface;
             tlsioConfig.underlying_io_parameters = underlyingIOParameters;
+            tlsioConfig.enable_ipv6 = 0;
             underlyingIOParameters = &tlsioConfig;
             underlyingIOInterface = platform_get_default_tlsio();
             if (underlyingIOInterface == nullptr)

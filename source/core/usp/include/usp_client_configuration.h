@@ -35,6 +35,7 @@ public:
         m_languageIdPriority(LanguageIdPriority::PrioritizeLatency),
         m_disable_crl_check(false),
         m_continue_on_crl_download_failure(false),
+        m_enableIpv6(false),
         m_authData{},
         m_userDefinedHttpHeaders{},
         m_connectionId(connectionId),
@@ -126,6 +127,15 @@ public:
     ClientConfiguration& SetContinueOnCrlDownloadFailure(bool continue_on_crl_download_failure)
     {
         m_continue_on_crl_download_failure = continue_on_crl_download_failure;
+        return *this;
+    }
+
+    /**
+     * Enables IPv6 resolution for the connection.
+     */
+    ClientConfiguration& SetEnableIpv6(bool enableIpv6)
+    {
+        m_enableIpv6 = enableIpv6;
         return *this;
     }
 
@@ -404,6 +414,7 @@ private:
     std::string m_trustedCert;
     bool m_disable_crl_check;
     bool m_continue_on_crl_download_failure;
+    bool m_enableIpv6;
     int m_max_crl_download_size_in_kb = -1;
 
     std::array<std::string, static_cast<size_t>(AuthenticationType::SIZE_AUTHENTICATION_TYPE)> m_authData;

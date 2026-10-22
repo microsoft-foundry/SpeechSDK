@@ -219,6 +219,7 @@
     REQUIRED_FUNCTION(i2d_X509_CRL_bio) \
     REQUIRED_FUNCTION(X509_VERIFY_PARAM_set_hostflags) \
     REQUIRED_FUNCTION(X509_VERIFY_PARAM_set1_host) \
+    REQUIRED_FUNCTION(X509_VERIFY_PARAM_set1_ip_asc) \
     REQUIRED_FUNCTION(SSL_set_verify) \
     REQUIRED_FUNCTION(X509_STORE_set_verify_cb) \
     REQUIRED_FUNCTION(X509_STORE_CTX_get_error) \
@@ -332,6 +333,7 @@ FOR_ALL_OPENSSL_FUNCTIONS
 #define X509_get_subject_name X509_get_subject_name_ptr
 #define X509_VERIFY_PARAM_set_hostflags X509_VERIFY_PARAM_set_hostflags_ptr
 #define X509_VERIFY_PARAM_set1_host X509_VERIFY_PARAM_set1_host_ptr
+#define X509_VERIFY_PARAM_set1_ip_asc X509_VERIFY_PARAM_set1_ip_asc_ptr
 #define SSL_set_verify SSL_set_verify_ptr
 #define X509_STORE_set_verify_cb X509_STORE_set_verify_cb_ptr
 #define X509_STORE_CTX_get_error X509_STORE_CTX_get_error_ptr

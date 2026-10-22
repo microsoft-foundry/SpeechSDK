@@ -32,6 +32,7 @@ namespace Impl {
         m_proxyBypass(),
         m_singleTrustedCert(),
         m_disableCrlChecks(false),
+        m_enableIpv6(false),
         m_continueOnCrlDownloadFailure(false),
         m_disableDefaultVerifyPaths(false),
         m_maxCrlDownloadSizeInKB(0),
@@ -112,6 +113,27 @@ namespace Impl {
     IHttpEndpointInfo& HttpEndpointInfo::Host(const std::string & hostname)
     {
         std::string trimmed = StringUtils::Trim(hostname);
+
+        const bool startsWithBracket = !trimmed.empty() && trimmed.front() == '[';
+        const bool endsWithBracket = !trimmed.empty() && trimmed.back() == ']';
+        if (startsWithBracket != endsWithBracket)
+        {
+            throw std::invalid_argument("Host name has invalid IPv6 brackets");
+        }
+        else if (startsWithBracket)
+        {
+            // Brackets are reserved for IP literals, so accepting a DNS name inside
+            // them would silently turn a malformed host into a name lookup.
+            if (!HttpUtils::IsIpv6Literal(trimmed.substr(1, trimmed.size() - 2)))
+            {
+                throw std::invalid_argument("Host name has invalid IPv6 brackets");
+            }
+            trimmed = HttpUtils::ParseUrl(std::string("https://") + trimmed).host;
+        }
+        else if (!trimmed.empty() && trimmed.back() == '%' && HttpUtils::IsIpv6Literal(trimmed))
+        {
+            throw std::invalid_argument("Host name has invalid IPv6 scope");
+        }
 
         if (trimmed.empty())
         {
@@ -326,6 +348,17 @@ namespace Impl {
         return m_disableCrlChecks;
     }
 
+    bool HttpEndpointInfo::IsIpv6Enabled() const
+    {
+        return m_enableIpv6;
+    }
+
+    IHttpEndpointInfo& HttpEndpointInfo::EnableIpv6(const bool enableIpv6)
+    {
+        m_enableIpv6 = enableIpv6;
+        return *this;
+    }
+
     IHttpEndpointInfo& HttpEndpointInfo::DisableCrlChecks(const bool disableCrlChecks)
     {
         m_disableCrlChecks = disableCrlChecks;
@@ -449,7 +482,7 @@ namespace Impl {
 
         std::ostringstream oss;
         oss << HttpUtils::SchemePrefix(m_url.scheme)
-            << m_url.host;
+            << HttpUtils::FormatHostForAuthority(m_url.host);
 
         if (!IsDefaultPort())
         {

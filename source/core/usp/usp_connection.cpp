@@ -264,7 +264,7 @@ std::string CSpxUspConnection::ConstructConnectionUrl() const
             else
             {
                 SPX_TRACE_INFO("Building endpoint from host");
-                oss << HttpUtils::SchemePrefix(url.scheme) << url.host << ':' << url.port;
+                oss << HttpUtils::SchemePrefix(url.scheme) << HttpUtils::FormatHostForAuthority(url.host) << ':' << url.port;
                 hostSet = true;
             }
         }
@@ -291,7 +291,7 @@ std::string CSpxUspConnection::ConstructConnectionUrl() const
         }
 
         SPX_TRACE_INFO("Building URL with host %s", m_config->m_customHostUrl.c_str());
-        oss << HttpUtils::SchemePrefix(url.scheme) << url.host << ':' << url.port;
+        oss << HttpUtils::SchemePrefix(url.scheme) << HttpUtils::FormatHostForAuthority(url.host) << ':' << url.port;
         customHost = true;
     }
     else if(!hostSet)
@@ -583,6 +583,7 @@ void CSpxUspConnection::Connect()
         SPX_TRACE_INFO("Set an underlying io option '%s'", option.first.c_str());
         endpoint.SetUnderlyingOption(option.first, option.second);
     }
+    endpoint.EnableIpv6(m_config->m_enableIpv6);
 
     // TODO: should probably update the ConstructConnectionUrl to set the scheme, host, path and query parameters
     //       directly on the endpoint instance

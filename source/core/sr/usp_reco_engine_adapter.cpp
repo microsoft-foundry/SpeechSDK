@@ -411,6 +411,7 @@ void CSpxUspRecoEngineAdapter::UspInitialize()
     // session, because currently there is a single connection for session at any point in time.
     auto sessionId = GetOr(PropertyId::Speech_SessionId, "");
     USP::ClientConfiguration clientConfiguration(uspCallbacks, USP::EndpointType::Speech, sessionId);
+    clientConfiguration.SetEnableIpv6(HttpUtils::IsIpv6Enabled(this));
 
     bool isCustomV1Endpoint = GetOr<bool>(g_isCustomV1Endpoint, false) || GetOr<bool>("SPEECH-ForceV1Endpoint", false);
     clientConfiguration.SetIsCustomV1Endpoint(isCustomV1Endpoint);

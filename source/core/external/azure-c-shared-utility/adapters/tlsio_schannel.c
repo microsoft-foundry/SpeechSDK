@@ -28,6 +28,7 @@
 #include "azure_c_shared_utility/shared_util_options.h"
 #include "azure_c_shared_utility/gballoc.h"
 #include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 
 #define TLSIO_STATE_VALUES                        \
     TLSIO_STATE_NOT_OPEN,                         \
@@ -336,6 +337,9 @@ static void send_client_hello(TLS_IO_INSTANCE* tls_io_instance)
         security_buffers_desc.pBuffers = init_security_buffers;
         security_buffers_desc.ulVersion = SECBUFFER_VERSION;
 
+        // pszTargetName is both the SNI hint and the name the certificate is
+        // checked against, so IP literals cannot be handled separately the way
+        // the OpenSSL adapter does. Schannel decides how to treat them.
         status = InitializeSecurityContext(&tls_io_instance->credential_handle,
             NULL, tls_io_instance->host_name, ISC_REQ_EXTENDED_ERROR | ISC_REQ_STREAM | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_USE_SUPPLIED_CREDS, 0, 0, NULL, 0,
             &tls_io_instance->security_context, &security_buffers_desc,
@@ -764,7 +768,8 @@ static void on_underlying_io_bytes_received(void* context, const unsigned char* 
                         }
                     }
                     break;
-                case SEC_E_UNTRUSTED_ROOT: // 0x80090325
+                case SEC_E_WRONG_PRINCIPAL: // 0x80090322
+                case SEC_E_UNTRUSTED_ROOT:  // 0x80090325
                     tls_io_instance->tlsio_state = TLSIO_STATE_ERROR;
                     if (tls_io_instance->on_io_open_complete != NULL)
                     {
@@ -1033,7 +1038,9 @@ CONCRETE_IO_HANDLE tlsio_schannel_create(void* io_create_parameters)
         {
             (void)memset(result, 0, sizeof(TLS_IO_INSTANCE));
 
-            size_t malloc_size = safe_add_size_t(strlen(tls_io_config->hostname), 1);
+            const size_t host_name_length = host_without_ipv6_scope_length(
+                tls_io_config->hostname, strlen(tls_io_config->hostname));
+            size_t malloc_size = safe_add_size_t(host_name_length, 1);
             malloc_size = safe_multiply_size_t(malloc_size, sizeof(SEC_TCHAR));
             if (malloc_size == SIZE_MAX ||
                 (result->host_name = (SEC_TCHAR*)malloc(malloc_size)) == NULL)
@@ -1049,11 +1056,11 @@ CONCRETE_IO_HANDLE tlsio_schannel_create(void* io_create_parameters)
                 void* io_interface_parameters;
 
                 #ifdef WINCE
-                /* Copy hostname including the null terminator */
-                (void)mbstowcs(result->host_name, tls_io_config->hostname, strlen(tls_io_config->hostname) + 1);
+                (void)mbstowcs(result->host_name, tls_io_config->hostname, host_name_length);
                 #else
-                (void)strcpy(result->host_name, tls_io_config->hostname);
+                (void)memcpy(result->host_name, tls_io_config->hostname, host_name_length);
                 #endif
+                result->host_name[host_name_length] = 0;
 
                 if (tls_io_config->underlying_io_interface != NULL)
                 {
@@ -1065,6 +1072,7 @@ CONCRETE_IO_HANDLE tlsio_schannel_create(void* io_create_parameters)
                     socketio_config.hostname = tls_io_config->hostname;
                     socketio_config.port = tls_io_config->port;
                     socketio_config.accepted_socket = NULL;
+                    socketio_config.enable_ipv6 = tls_io_config->enable_ipv6;
 
                     underlying_io_interface = socketio_get_interface_description();
                     io_interface_parameters = &socketio_config;

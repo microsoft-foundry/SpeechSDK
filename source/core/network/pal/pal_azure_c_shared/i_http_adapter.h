@@ -21,7 +21,8 @@ namespace HttpAdapter
             const char* proxyHost,
             int proxyPort,
             const char* proxyUserName,
-            const char* proxyPassword) = 0;
+            const char* proxyPassword,
+            bool enableIpv6) = 0;
         virtual void CloseHttpConnection() = 0;
         virtual int32_t ExecuteRequest(
             HTTPAPI_REQUEST_TYPE requestType,

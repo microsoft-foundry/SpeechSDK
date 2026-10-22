@@ -20,6 +20,9 @@ typedef struct SOCKETIO_CONFIG_TAG
     const char* hostname;
     int port;
     void* accepted_socket;
+    /* Non-zero to resolve both AAAA and A records; zero to resolve IPv4 only.
+       Read when the connection is opened, so it must be set before then. */
+    int enable_ipv6;
 } SOCKETIO_CONFIG;
 
 #define RECEIVE_BYTES_VALUE     64

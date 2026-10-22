@@ -14,6 +14,7 @@ ${theseTestsName}.c
 
 set(${theseTestsName}_c_files
 ../../src/uws_client.c
+../../src/host_utils.c
 ../real_test_files/real_buffer.c
 )
 

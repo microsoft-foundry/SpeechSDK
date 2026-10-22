@@ -243,6 +243,8 @@ namespace Impl {
         /// </summary>
         /// <returns>True if disabled, false otherwise</returns>
         bool DisableCrlChecks() const override;
+        virtual IHttpEndpointInfo& EnableIpv6(const bool enableIpv6) override;
+        bool IsIpv6Enabled() const override;
 
         /// <summary>
         /// Sets whether or not CRL checks will be skipped if the CRL cannot be downloaded.
@@ -315,6 +317,7 @@ namespace Impl {
         std::vector<std::string> m_proxyBypass;
         std::string m_singleTrustedCert;
         bool m_disableCrlChecks;
+        bool m_enableIpv6;
         bool m_continueOnCrlDownloadFailure;
         bool m_disableDefaultVerifyPaths;
         int m_maxCrlDownloadSizeInKB;

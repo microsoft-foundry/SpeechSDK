@@ -260,6 +260,16 @@ namespace Impl {
         virtual bool DisableCrlChecks() const = 0;
 
         /// <summary>
+        /// Whether name resolution may return IPv6 addresses for this endpoint.
+        /// </summary>
+        virtual IHttpEndpointInfo& EnableIpv6(const bool enableIpv6) = 0;
+
+        /// <summary>
+        /// Gets whether IPv6 resolution is enabled for this endpoint.
+        /// </summary>
+        virtual bool IsIpv6Enabled() const = 0;
+
+        /// <summary>
         /// Sets whether or not CRL checks will be skipped if the CRL cannot be downloaded.
         /// </summary>
         /// <param name="continueOnCrlDownloadFailure">True to continue on failure, false otherwise</param>

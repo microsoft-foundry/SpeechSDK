@@ -68,6 +68,38 @@ public:
     static Url ParseUrl(const std::string& urlStr);
 
     /// <summary>
+    /// Returns true if the host is an IPv6 literal in internal form, i.e. unbracketed
+    /// and with a raw "%" zone delimiter if it is scoped.
+    /// </summary>
+    /// <param name="host">The unbracketed host to test</param>
+    static bool IsIpv6Literal(const std::string& host);
+
+    /// <summary>
+    /// Formats a host for use in a URI or HTTP authority. IPv6 literals are bracketed
+    /// and their zone delimiter is encoded as "%25" per RFC 6874; DNS names and IPv4
+    /// literals are returned unchanged.
+    ///
+    /// Use this for URIs that stay on this host, for example endpoint URLs that are
+    /// parsed back into a Url. For anything sent to a peer use
+    /// <see cref="FormatHostForOutgoingAuthority" /> instead.
+    /// </summary>
+    /// <param name="host">The unbracketed host to format</param>
+    /// <returns>The host formatted for a URI authority</returns>
+    /// <exception cref="ExceptionWithCallStack">If the host contains an embedded NUL</exception>
+    static std::string FormatHostForAuthority(const std::string& host);
+
+    /// <summary>
+    /// Formats a host for an authority that is sent to a peer, such as an HTTP Host
+    /// header. Identical to <see cref="FormatHostForAuthority" /> except that an IPv6
+    /// zone ID is removed, which RFC 6874 section 4 requires of outgoing URIs because
+    /// a zone only has meaning on the sending host.
+    /// </summary>
+    /// <param name="host">The unbracketed host to format</param>
+    /// <returns>The host formatted for an outgoing authority</returns>
+    /// <exception cref="ExceptionWithCallStack">If the host contains an embedded NUL</exception>
+    static std::string FormatHostForOutgoingAuthority(const std::string& host);
+
+    /// <summary>
     /// URL escapes a value. So for example "Hello? how are you" would become
     /// "Hello%3f%20how%20are%20you"
     /// </summary>
@@ -160,8 +192,15 @@ public:
     static void ParseProxyConfig(const ISpxNamedProperties* properties, IHttpEndpointInfo& endpoint, bool validateValues = true);
 
     /// <summary>
+    /// Gets the IPv6 opt-in from named properties. Only true/1 enables IPv6;
+    /// unrecognized values leave it disabled.
+    /// </summary>
+    static bool IsIpv6Enabled(const ISpxNamedProperties* properties);
+
+    /// <summary>
     /// Helper method to parse the SSL related configuration from the named properties. This will configure CRL
-    /// checks, max CRL download size, continuing on CRL download failures, as well as single trusted certs
+    /// checks, max CRL download size, continuing on CRL download failures, single trusted certs,
+    /// and the IPv6 opt-in
     /// </summary>
     /// <param name="endpoint">The endpoint to configure</param>
     /// <param name="properties">The named properties to parse</param>

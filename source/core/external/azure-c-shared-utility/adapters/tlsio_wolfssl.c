@@ -655,6 +655,7 @@ CONCRETE_IO_HANDLE tlsio_wolfssl_create(void* io_create_parameters)
                     socketio_config.hostname = tls_io_config->hostname;
                     socketio_config.port = tls_io_config->port;
                     socketio_config.accepted_socket = NULL;
+                    socketio_config.enable_ipv6 = tls_io_config->enable_ipv6;
 
                     underlying_io_interface = socketio_get_interface_description();
                     io_interface_parameters = &socketio_config;

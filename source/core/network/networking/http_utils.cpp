@@ -5,6 +5,17 @@
 
 #include "stdafx.h"
 #include <stdio.h>
+
+#ifdef _WIN32
+#include <ws2tcpip.h>
+// ws2tcpip.h drags in the windows min/max macros, which shadow the
+// std::numeric_limits<>::max() calls below.
+#undef max
+#undef min
+#else
+#include <arpa/inet.h>
+#endif
+
 #include "property_id_2_name_map.h"
 #include "http_utils.h"
 #include "string_utils.h"
@@ -33,6 +44,97 @@ namespace Impl {
     static constexpr auto INVALID_URL_SCHEME = "URL scheme is invalid";
     static constexpr auto MISSING_URL_HOST = "URL is missing host";
     static constexpr auto INVALID_URL_PORT = "URL port is invalid";
+    static constexpr auto INVALID_URL_IPV6_LITERAL = "URL IPv6 literal is invalid";
+
+    static bool IsUnreserved(char value)
+    {
+        const unsigned char c = static_cast<unsigned char>(value);
+        return (c >= '0' && c <= '9')
+            || (c >= 'A' && c <= 'Z')
+            || (c >= 'a' && c <= 'z')
+            || c == '-'
+            || c == '.'
+            || c == '_'
+            || c == '~';
+    }
+
+    /// <summary>
+    /// Returns the value of a single hex digit, or -1 if it is not one.
+    /// </summary>
+    static int HexValue(char value)
+    {
+        if (value >= '0' && value <= '9')
+        {
+            return value - '0';
+        }
+        else if (value >= 'A' && value <= 'F')
+        {
+            return value - 'A' + 10;
+        }
+        else if (value >= 'a' && value <= 'f')
+        {
+            return value - 'a' + 10;
+        }
+
+        return -1;
+    }
+
+    static bool IsValidIpv6Address(const std::string& address)
+    {
+#ifdef _WIN32
+        IN6_ADDR parsedAddress;
+        return InetPtonA(AF_INET6, address.c_str(), &parsedAddress) == 1;
+#else
+        struct in6_addr parsedAddress;
+        return inet_pton(AF_INET6, address.c_str(), &parsedAddress) == 1;
+#endif
+    }
+
+    /// <summary>
+    /// Decodes an RFC 6874 ZoneID, which is 1*( unreserved / pct-encoded ). Anything
+    /// else in the zone makes the literal invalid rather than being passed through.
+    /// </summary>
+    static bool TryDecodeRfc6874Zone(const std::string& encodedZone, std::string& decodedZone)
+    {
+        if (encodedZone.empty())
+        {
+            return false;
+        }
+
+        decodedZone.clear();
+        for (size_t i = 0; i < encodedZone.length(); i++)
+        {
+            const char value = encodedZone[i];
+            if (IsUnreserved(value))
+            {
+                decodedZone += value;
+                continue;
+            }
+
+            if (value != '%' || i + 2 >= encodedZone.length())
+            {
+                return false;
+            }
+
+            const int high = HexValue(encodedZone[i + 1]);
+            const int low = HexValue(encodedZone[i + 2]);
+            if (high < 0 || low < 0)
+            {
+                return false;
+            }
+
+            const char decoded = static_cast<char>((high << 4) | low);
+            if (decoded == '\0')
+            {
+                return false;
+            }
+
+            decodedZone += decoded;
+            i += 2;
+        }
+
+        return true;
+    }
 
     Url HttpUtils::ParseUrl(const std::string& rawUrlStr)
     {
@@ -47,12 +149,58 @@ namespace Impl {
 
         std::string::const_iterator pos = url.begin() + strnlen(SchemePrefix(parsed.scheme), 10);
 
-        auto hostIter = std::find_if(pos, url.cend(), [](char c) {
-            return c == '/' || c == '?' || c == ':' || c == '#';
-        });
+        if (pos != url.cend() && *pos == '[')
+        {
+            const auto closingBracket = std::find(pos + 1, url.cend(), ']');
+            if (closingBracket == url.cend())
+            {
+                ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+            }
 
-        parsed.host = std::string(pos, hostIter);
-        pos = hostIter;
+            const std::string literal(pos + 1, closingBracket);
+            const auto scopeStart = literal.find('%');
+            const std::string address = literal.substr(0, scopeStart);
+
+            // IsValidIpv6Address reads a NUL terminated string, so an embedded NUL
+            // would hide whatever follows it from validation.
+            if (address.find('\0') != std::string::npos || !IsValidIpv6Address(address))
+            {
+                ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+            }
+
+            if (scopeStart == std::string::npos)
+            {
+                parsed.host = address;
+            }
+            else
+            {
+                // RFC 6874 requires the zone delimiter to arrive encoded as "%25".
+                // The raw "%" form is rejected rather than guessed at.
+                std::string zone;
+                if (literal.compare(scopeStart, 3, "%25") != 0
+                    || !TryDecodeRfc6874Zone(literal.substr(scopeStart + 3), zone))
+                {
+                    ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+                }
+
+                parsed.host = address + '%' + zone;
+            }
+
+            pos = closingBracket + 1;
+            if (pos != url.cend() && *pos != ':' && *pos != '/' && *pos != '?' && *pos != '#')
+            {
+                ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+            }
+        }
+        else
+        {
+            auto hostIter = std::find_if(pos, url.cend(), [](char c) {
+                return c == '/' || c == '?' || c == ':' || c == '#';
+            });
+
+            parsed.host = std::string(pos, hostIter);
+            pos = hostIter;
+        }
 
         // for our purposes, we require that the host is set for all schemes other than file://
         if (parsed.scheme != UriScheme::FILE && parsed.host.empty())
@@ -122,6 +270,60 @@ namespace Impl {
         return parsed;
     }
 
+    bool HttpUtils::IsIpv6Literal(const std::string& host)
+    {
+        if (host.find('\0') != std::string::npos)
+        {
+            return false;
+        }
+
+        // The internal host form carries a raw "%" zone delimiter; only the address
+        // part is an IPv6 literal.
+        return IsValidIpv6Address(host.substr(0, host.find('%')));
+    }
+
+    std::string HttpUtils::FormatHostForAuthority(const std::string& host)
+    {
+        if (host.find('\0') != std::string::npos)
+        {
+            ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+        }
+
+        if (!IsIpv6Literal(host))
+        {
+            // DNS names, IPv4 literals and already bracketed hosts are used as-is.
+            return host;
+        }
+
+        const auto scopeStart = host.find('%');
+        std::string formatted = "[" + host.substr(0, scopeStart);
+
+        if (scopeStart != std::string::npos)
+        {
+            formatted += "%25";
+            formatted += UrlEscape(host.substr(scopeStart + 1));
+        }
+
+        return formatted + ']';
+    }
+
+    std::string HttpUtils::FormatHostForOutgoingAuthority(const std::string& host)
+    {
+        if (host.find('\0') != std::string::npos)
+        {
+            ThrowInvalidArgumentException(INVALID_URL_IPV6_LITERAL);
+        }
+
+        if (!IsIpv6Literal(host))
+        {
+            return host;
+        }
+
+        // RFC 6874 section 4: a ZoneID has only local significance at the sending
+        // host, so it MUST be removed from anything handed to a peer.
+        return "[" + host.substr(0, host.find('%')) + ']';
+    }
+
     std::string HttpUtils::UrlEscape(const std::string& value)
     {
         if (value.empty())
@@ -132,13 +334,7 @@ namespace Impl {
         std::string escaped;
         for (const char c : value)
         {
-            if ((c >= '0' && c <= '9')
-                || (c >= 'A' && c <= 'Z')
-                || (c >= 'a' && c <= 'z')
-                || c == '-'
-                || c == '.'
-                || c == '_'
-                || c == '~')
+            if (IsUnreserved(c))
             {
                 escaped += c;
             }
@@ -164,22 +360,13 @@ namespace Impl {
 
         static auto unhex = [](char c) -> uint32_t
         {
-            if (c >= '0' && c <= '9')
-            {
-                return c - '0';
-            }
-            else if (c >= 'A' && c <= 'F')
-            {
-                return c - 'A' + 10;
-            }
-            else if (c >= 'a' && c <= 'f')
-            {
-                return c - 'a' + 10;
-            }
-            else
+            const int value = HexValue(c);
+            if (value < 0)
             {
                 ThrowInvalidArgumentException(INVALID_ESCAPED_URL);
             }
+
+            return static_cast<uint32_t>(value);
         };
 
         uint32_t decoded;
@@ -471,6 +658,34 @@ namespace Impl {
         endpoint.Proxy(&proxy);
     }
 
+    bool HttpUtils::IsIpv6Enabled(const ISpxNamedProperties* properties)
+    {
+        if (properties == nullptr)
+        {
+            return false;
+        }
+
+        auto maybeValue = properties->Get<std::string>(PropertyId::SpeechServiceConnection_EnableIpv6);
+        if (!maybeValue)
+        {
+            return false;
+        }
+
+        auto value = StringUtils::Trim(maybeValue.Get());
+        if (value == "1" || (value.size() == 4 && PAL::stricmp(value.c_str(), "true") == 0))
+        {
+            return true;
+        }
+        if (value.empty() || value == "0" || (value.size() == 5 && PAL::stricmp(value.c_str(), "false") == 0))
+        {
+            return false;
+        }
+
+        SPX_TRACE_WARNING("Invalid value for %s; IPv6 remains disabled",
+            GetPropertyName(PropertyId::SpeechServiceConnection_EnableIpv6));
+        return false;
+    }
+
     void HttpUtils::ParseSSLConfig(const ISpxNamedProperties* properties, IHttpEndpointInfo& endpoint)
     {
         UNUSED(endpoint);
@@ -495,6 +710,10 @@ namespace Impl {
         endpoint.DisableCrlChecks(disableCrlCheck || (maybeSingleTrustedCert && !singleTrustedCertCrlCheck));
 
         endpoint.ContinueOnCrlDownloadFailure(properties->GetOr<bool>("OPENSSL_CONTINUE_ON_CRL_DOWNLOAD_FAILURE", true));
+
+        // Preview opt-in. Off means resolve IPv4 only, which is what this stack
+        // did before IPv6 support was added.
+        endpoint.EnableIpv6(IsIpv6Enabled(properties));
     }
 
 } } } }

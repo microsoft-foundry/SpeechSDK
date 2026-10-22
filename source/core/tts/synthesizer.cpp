@@ -8,6 +8,7 @@
 #include "stdafx.h"
 #include "synthesizer.h"
 #include "synthesizer_connection.h"
+#include "speechapi_cxx_utils.h" // Utils::MakeScopeGuard (Android decoder exit guard)
 #include <future>
 #include <thread>
 #include <ajv.h>
@@ -241,6 +242,24 @@ std::shared_ptr<ISpxSynthesisResult> CSpxSynthesizer::ExecuteSynthesis(const std
 
     EnsureValidToken();
 
+#ifdef __ANDROID__
+    // Exit guard for this synthesis turn. The normal path stops and joins the decoder adapter
+    // explicitly further down (m_codecAdapter->Close()); this guard covers early exits, i.e.
+    // exceptions thrown in between, so a decoder worker never keeps running (and calling back
+    // into this object) after ExecuteSynthesis has unwound. On the normal path it does nothing
+    // as m_codecAdapter has been reset by then. It only stops the worker; it does not reset the
+    // other per-turn state.
+    auto decoderCleanup = Utils::MakeScopeGuard([this]() {
+        if (m_codecAdapter)
+        {
+            try {
+                m_codecAdapter->Close();
+            }
+            catch (...) { SPX_TRACE_ERROR("Android decoder close failed during synthesis exit cleanup"); }
+        }
+    });
+#endif
+
     m_audioReceived = false;
     m_writeToOutputFailed = false;
     m_resultProperties.reset();
@@ -332,6 +351,18 @@ std::shared_ptr<ISpxSynthesisResult> CSpxSynthesizer::ExecuteSynthesis(const std
         decodingError = ErrorInfo::FromExplicitError(CancellationErrorCode::RuntimeError, errorMessage);
         m_decodingDone = true;
     }
+
+#ifdef __ANDROID__
+    // Stop and join the decoder worker. m_decodingDone only means that decoding is logically
+    // finished -- EOS was seen, an error was reported, or the wait above timed out -- the worker
+    // thread may still be running and calling WriteToOutput(). Closing here is what guarantees
+    // that it is not.
+    // Unlike the exit guard above, an exception from Close() propagates from here.
+    if (m_codecAdapter)
+    {
+        m_codecAdapter->Close();
+    }
+#endif
 
     if (m_audioOfCurrentTurn)
     {
@@ -845,8 +876,18 @@ uint32_t CSpxSynthesizer::Write(ISpxTtsEngineAdapter*, const std::string& reques
 
                 auto initCallbacks = SpxQueryInterface<ISpxAudioStreamReaderInitCallbacks>(codecAdapter);
                 initCallbacks->SetCallbacks(
-                    [reader](uint8_t* _buffer, uint32_t _size) { return reader->Read(_buffer, _size); },
+                    [reader](uint8_t* _buffer, uint32_t _size) {
+                        return reader->Read(_buffer, _size);
+                    },
+#ifdef __ANDROID__
+                    // Input-close callback, run once from CSpxAndroidCodecAdapter::Close(). Closing the
+                    // codec input buffer ends writing, which wakes a worker blocked in the read callback
+                    // above so that Close() can join it. Android only; other adapters keep a no-op.
+                    // The lambda holds codecBuffer by value, so it stays valid while it can be called.
+                    [codecBuffer]() { codecBuffer->Close(); });
+#else
                     []() {  });
+#endif
 
                 initCallbacks->SetPropertyCallback2(
                     [this](PropertyId propertyId)
@@ -856,7 +897,11 @@ uint32_t CSpxSynthesizer::Write(ISpxTtsEngineAdapter*, const std::string& reques
                 writerInitCallbacks->SetWriterCallbacks(
                     [this, requestId](const uint8_t* _buffer, uint32_t _size) {
                         return this->WriteToOutput(_buffer, _size, requestId); },
-                    [this]() { this->m_decodingDone = true; });
+                    [this]() {
+                        // Called by the worker at end of stream. Marks logical completion only;
+                        // the worker thread itself is stopped and joined by Close().
+                        this->m_decodingDone = true;
+                    });
 
                 auto adapterAsCodec = SpxQueryInterface<ISpxAudioCodecAdapter>(codecAdapter);
                 adapterAsCodec->EnableThrottling(GetOr<bool>("SPEECH-SynthThrottleDecoding", false));

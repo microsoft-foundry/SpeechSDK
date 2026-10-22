@@ -70,7 +70,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            SOCKETIO_CONFIG socketio_config;
+            SOCKETIO_CONFIG socketio_config = { 0 };
             XIO_HANDLE socketio;
 
             socketio_config.hostname = "www.google.com";

@@ -18,6 +18,8 @@ namespace WebSocketAdapter
         std::string relative_path;
         std::string trusted_ca;
         int use_ssl;
+        // Non-zero to let name resolution return IPv6 addresses.
+        int enable_ipv6;
     };
 
     struct ProxyConfiguration
