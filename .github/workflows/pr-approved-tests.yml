@@ -1,6 +1,6 @@
 # Event-triggered runs select approved candidates; automatically dispatched runs test them.
 # Approval is queried from GitHub, never inferred from the triggering workflow's success.
-name: Approved PR tests
+name: Approved tests
 on:
   push:
     branches: [main]
