@@ -132,7 +132,7 @@ MOCKABLE_FUNCTION(, HTTP_HANDLE, HTTPAPI_CreateConnection, const char*, hostName
 MOCKABLE_FUNCTION(, HTTP_HANDLE, HTTPAPI_CreateConnection_Advanced, const char*, hostName,
                                           int, port, bool, secure,
                                           const char*, proxyHost, int, proxyPort, const char*,
-                                          proxyUsername, const char*, proxyPassword);
+                                          proxyUsername, const char*, proxyPassword, bool, enable_ipv6);
 
 /**
  * @brief	Closes a connection created with ::HTTPAPI_CreateConnection.

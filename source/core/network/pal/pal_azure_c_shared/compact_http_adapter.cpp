@@ -71,7 +71,8 @@ int32_t CompactHttpAdapter::OpenHttpConnection(
     const char* proxyHost,
     int proxyPort,
     const char* proxyUserName,
-    const char* proxyPassword)
+    const char* proxyPassword,
+    bool enableIpv6)
 {
     SPX_TRACE_SCOPE(__FUNCTION__, __FUNCTION__);
     int32_t result = HTTPAPI_OK;
@@ -89,7 +90,8 @@ int32_t CompactHttpAdapter::OpenHttpConnection(
             proxyHost,
             proxyPort,
             proxyUserName,
-            proxyPassword);
+            proxyPassword,
+            enableIpv6);
         if (m_handle == nullptr)
         {
             SPX_TRACE_ERROR("Failed to create http connection");

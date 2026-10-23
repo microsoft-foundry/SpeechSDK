@@ -2,19 +2,27 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 #include <stdlib.h>
+#include <string.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <limits.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <mstcpip.h>
 #include "azure_c_shared_utility/socketio.h"
+#include "azure_c_shared_utility/shared_util_options.h"
 #include "azure_c_shared_utility/singlylinkedlist.h"
 #include "azure_c_shared_utility/gballoc.h"
 #include "azure_c_shared_utility/gbnetwork.h"
 #include "azure_c_shared_utility/optimize_size.h"
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/safe_math.h"
+
+// Time allowed for a connect attempt against a single resolved address. There
+// is no budget shared across addresses: each candidate gets this in full, so a
+// blackholed address cannot deny the ones behind it their attempt.
+#define CONNECT_TIMEOUT_PER_ADDRESS_MS 10000
 
 typedef enum IO_STATE_TAG
 {
@@ -42,6 +50,7 @@ typedef struct SOCKET_IO_INSTANCE_TAG
     void* on_io_error_context;
     char* hostname;
     int port;
+    int enable_ipv6;
     IO_STATE io_state;
     SINGLYLINKEDLIST_HANDLE pending_io_list;
     struct tcp_keepalive keep_alive;
@@ -51,9 +60,18 @@ typedef struct SOCKET_IO_INSTANCE_TAG
 /*this function will clone an option given by name and value*/
 static void* socketio_CloneOption(const char* name, const void* value)
 {
-    (void)name;
-    (void)value;
-    return NULL;
+    void* result = NULL;
+
+    if ((name == NULL) || (value == NULL))
+    {
+        LogError("Failed cloning option (name or value is NULL)");
+    }
+    else
+    {
+        LogError("Cannot clone option %s (not supported)", name);
+    }
+
+    return result;
 }
 
 /*this function destroys an option previously created*/
@@ -66,17 +84,20 @@ static void socketio_DestroyOption(const char* name, const void* value)
 static OPTIONHANDLER_HANDLE socketio_retrieveoptions(CONCRETE_IO_HANDLE handle)
 {
     OPTIONHANDLER_HANDLE result;
-    (void)handle;
-    result = OptionHandler_Create(socketio_CloneOption, socketio_DestroyOption, socketio_setoption);
-    if (result == NULL)
+    if (handle == NULL)
     {
-        LogError("unable to OptionHandler_Create");
-        /*return as is*/
+        LogError("failed retrieving options (handle is NULL)");
+        result = NULL;
     }
     else
     {
-        /*insert here work to add the options to "result" handle*/
+        result = OptionHandler_Create(socketio_CloneOption, socketio_DestroyOption, socketio_setoption);
+        if (result == NULL)
+        {
+            LogError("unable to OptionHandler_Create");
+        }
     }
+
     return result;
 }
 
@@ -202,6 +223,7 @@ CONCRETE_IO_HANDLE socketio_create(void* io_create_parameters)
                 else
                 {
                     result->port = socket_io_config->port;
+                    result->enable_ipv6 = socket_io_config->enable_ipv6;
                     result->on_bytes_received = NULL;
                     result->on_io_error = NULL;
                     result->on_bytes_received_context = NULL;
@@ -255,6 +277,202 @@ void socketio_destroy(CONCRETE_IO_HANDLE socket_io)
     }
 }
 
+// Rejects a resolved address that cannot safely be handed to socket() and
+// connect(). The caller skips it and moves on to the next candidate.
+static int validate_addrinfo(const ADDRINFO* addr, const char* hostname, int* error_code)
+{
+    int result = 0;
+
+    if (addr->ai_addr == NULL)
+    {
+        *error_code = WSAEINVAL;
+        LogError("Failure: resolved address is NULL for host %s.", hostname);
+        result = __FAILURE__;
+    }
+    else if ((addr->ai_family != AF_INET) && (addr->ai_family != AF_INET6))
+    {
+        *error_code = WSAEAFNOSUPPORT;
+        LogError("Failure: unsupported address family %d for host %s.", addr->ai_family, hostname);
+        result = __FAILURE__;
+    }
+    else if (((addr->ai_family == AF_INET) && (addr->ai_addrlen < sizeof(struct sockaddr_in))) ||
+             ((addr->ai_family == AF_INET6) && (addr->ai_addrlen < sizeof(struct sockaddr_in6))))
+    {
+        *error_code = WSAEINVAL;
+        LogError("Failure: resolved address length %llu is too short for host %s.",
+            (unsigned long long)addr->ai_addrlen, hostname);
+        result = __FAILURE__;
+    }
+    else if (addr->ai_addrlen > (size_t)INT_MAX)
+    {
+        *error_code = WSAEINVAL;
+        LogError("Failure: resolved address length %llu does not fit connect for host %s.",
+            (unsigned long long)addr->ai_addrlen, hostname);
+        result = __FAILURE__;
+    }
+    else if (addr->ai_addr->sa_family != addr->ai_family)
+    {
+        *error_code = WSAEINVAL;
+        LogError("Failure: resolved address family %u does not match addrinfo family %d for host %s.",
+            (unsigned int)addr->ai_addr->sa_family, addr->ai_family, hostname);
+        result = __FAILURE__;
+    }
+
+    return result;
+}
+
+// Attempt to connect to a single resolved address. On success returns 0 with the
+// socket open and non-blocking; on failure returns __FAILURE__, closes the socket,
+// sets it to INVALID_SOCKET, and records the Winsock error in *error_code.
+static int connect_to_addrinfo(SOCKET_IO_INSTANCE* socket_io_instance, ADDRINFO* addr, int timeout_ms, int* error_code)
+{
+    // Every branch below is a failure except the two that reach result = 0, and
+    // the cleanup at the end keys off result, so default to failure.
+    int result = __FAILURE__;
+    const char* hostname = (socket_io_instance->hostname != NULL) ? socket_io_instance->hostname : "<unknown>";
+
+    socket_io_instance->socket = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+    if (socket_io_instance->socket == INVALID_SOCKET)
+    {
+        *error_code = WSAGetLastError();
+        LogError("Failure: socket create failure %d for %s.", *error_code, hostname);
+    }
+    else
+    {
+        u_long nonblocking = 1;
+
+        // Windows defaults an AF_INET6 socket to v6-only, which refuses an
+        // IPv4-mapped destination such as ::ffff:203.0.113.1 with
+        // WSAEADDRNOTAVAIL before any packet is sent. Clear the option so a
+        // mapped literal reaches its IPv4 destination, matching Linux, where
+        // the kernel default (net.ipv6.bindv6only=0) already allows it.
+        // Only meaningful on an AF_INET6 socket; a failure here is not fatal.
+        if (addr->ai_family == AF_INET6)
+        {
+            int v6only = 0;
+            if (setsockopt(socket_io_instance->socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                (const char*)&v6only, sizeof(v6only)) != 0)
+            {
+                LogInfo("Could not clear IPV6_V6ONLY (%d) for %s; IPv4-mapped destinations may be refused.",
+                    WSAGetLastError(), hostname);
+            }
+        }
+
+        if (ioctlsocket(socket_io_instance->socket, FIONBIO, &nonblocking) != 0)
+        {
+            *error_code = WSAGetLastError();
+            LogError("Failure: ioctlsocket failure %d for %s:%d.", *error_code, hostname, socket_io_instance->port);
+        }
+        else
+        {
+            char resolved_ip[INET6_ADDRSTRLEN] = { 0 };
+            const char* resolved_ip_str = NULL;
+            if (addr->ai_family == AF_INET && addr->ai_addr != NULL)
+            {
+                struct sockaddr_in* sin = (struct sockaddr_in*)addr->ai_addr;
+                resolved_ip_str = InetNtopA(AF_INET, &sin->sin_addr, resolved_ip, sizeof(resolved_ip));
+            }
+            else if (addr->ai_family == AF_INET6 && addr->ai_addr != NULL)
+            {
+                struct sockaddr_in6* sin6 = (struct sockaddr_in6*)addr->ai_addr;
+                resolved_ip_str = InetNtopA(AF_INET6, &sin6->sin6_addr, resolved_ip, sizeof(resolved_ip));
+            }
+
+            if (resolved_ip_str != NULL)
+            {
+                LogInfo("DNS resolved %s to %s, connecting to %s:%d", hostname, resolved_ip_str, hostname, socket_io_instance->port);
+            }
+            else
+            {
+                LogInfo("DNS resolved successfully, connecting to %s:%d", hostname, socket_io_instance->port);
+            }
+
+            if (connect(socket_io_instance->socket, addr->ai_addr, (int)addr->ai_addrlen) == 0)
+            {
+                result = 0;
+            }
+            else
+            {
+                int connect_error = WSAGetLastError();
+                if ((connect_error != WSAEWOULDBLOCK) &&
+                    (connect_error != WSAEINPROGRESS) &&
+                    (connect_error != WSAEALREADY))
+                {
+                    *error_code = connect_error;
+                    LogError("Failure: connect to %s:%d failed with error %d.", hostname, socket_io_instance->port, *error_code);
+                }
+                else
+                {
+                    fd_set write_fds;
+                    fd_set except_fds;
+                    struct timeval timeout;
+                    FD_ZERO(&write_fds);
+                    FD_ZERO(&except_fds);
+                    FD_SET(socket_io_instance->socket, &write_fds);
+                    FD_SET(socket_io_instance->socket, &except_fds);
+                    timeout.tv_sec = timeout_ms / 1000;
+                    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+                    LogInfo("Connect in progress, waiting up to %d milliseconds for %s:%d",
+                        timeout_ms, hostname, socket_io_instance->port);
+
+                    int select_result = select(0, NULL, &write_fds, &except_fds, &timeout);
+                    if (select_result == 0)
+                    {
+                        *error_code = WSAETIMEDOUT;
+                        LogError("Failure: connection timed out after %d milliseconds waiting for %s:%d.",
+                            timeout_ms, hostname, socket_io_instance->port);
+                    }
+                    else if (select_result == SOCKET_ERROR)
+                    {
+                        *error_code = WSAGetLastError();
+                        LogError("Failure: select failed with error %d for %s:%d.",
+                            *error_code, hostname, socket_io_instance->port);
+                    }
+                    else
+                    {
+                        int socket_error = 0;
+                        int socket_error_length = sizeof(socket_error);
+                        if (getsockopt(socket_io_instance->socket, SOL_SOCKET, SO_ERROR,
+                            (char*)&socket_error, &socket_error_length) == SOCKET_ERROR)
+                        {
+                            *error_code = WSAGetLastError();
+                            LogError("Failure: getsockopt failed with error %d for %s:%d.",
+                                *error_code, hostname, socket_io_instance->port);
+                        }
+                        else if (socket_error != 0)
+                        {
+                            *error_code = socket_error;
+                            LogError("Failure: connect to %s:%d failed with error %d.",
+                                hostname, socket_io_instance->port, *error_code);
+                        }
+                        else
+                        {
+                            result = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (result != 0)
+    {
+        if (socket_io_instance->socket != INVALID_SOCKET)
+        {
+            (void)closesocket(socket_io_instance->socket);
+        }
+        socket_io_instance->socket = INVALID_SOCKET;
+    }
+    else
+    {
+        LogInfo("TCP connection to %s:%d established successfully.", hostname, socket_io_instance->port);
+        *error_code = 0;
+    }
+
+    return result;
+}
+
 int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_complete, void* on_io_open_complete_context, ON_BYTES_RECEIVED on_bytes_received, void* on_bytes_received_context, ON_IO_ERROR on_io_error, void* on_io_error_context)
 {
     int result;
@@ -287,89 +505,77 @@ int socketio_open(CONCRETE_IO_HANDLE socket_io, ON_IO_OPEN_COMPLETE on_io_open_c
 
             result = 0;
         }
+        else if (socket_io_instance->hostname == NULL || socket_io_instance->hostname[0] == '\0')
+        {
+            LogError("Failure: hostname is NULL or empty");
+            result = open_result_detailed.code = __FAILURE__;
+        }
         else
         {
-            socket_io_instance->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (socket_io_instance->socket == INVALID_SOCKET)
+            char portString[16];
+            ADDRINFO addrHint = { 0 };
+            ADDRINFO* addrInfo = NULL;
+
+            // AF_UNSPEC asks for A and AAAA; AF_INET restores the IPv4-only
+            // lookup this adapter did before IPv6 support was added. Apply
+            // the opt-in to every host form, including IPv6 literals.
+            addrHint.ai_family = (socket_io_instance->enable_ipv6 != 0) ? AF_UNSPEC : AF_INET;
+            addrHint.ai_socktype = SOCK_STREAM;
+            addrHint.ai_protocol = 0;
+            // ai_flags is deliberately left clear, matching socketio_berkeley.c.
+            // AI_ADDRCONFIG is measured to suppress AAAA on glibc whenever the host
+            // has no non-loopback IPv6 address, putting even "::1" out of reach; the
+            // Winsock threshold is unverified. Either way the flag buys nothing here,
+            // since ai_family already names the families the caller asked for.
+            sprintf(portString, "%d", socket_io_instance->port);
+            LogInfo("Starting DNS lookup for %s:%d", hostname, socket_io_instance->port);
+            int addrResult = getaddrinfo(socket_io_instance->hostname, portString, &addrHint, &addrInfo);
+            if (addrResult != 0)
             {
-                open_result_detailed.code = WSAGetLastError();
-                LogError("Failure: socket create failure %d for %s.", open_result_detailed.code, hostname);
+                open_result_detailed.code = addrResult;
+                LogError("Failure: getaddrinfo failure %d (%s) for host %s.", open_result_detailed.code, gai_strerrorA(open_result_detailed.code), hostname);
                 result = __FAILURE__;
             }
             else
             {
-                char portString[16];
-                ADDRINFO addrHint = { 0 };
-                ADDRINFO* addrInfo = NULL;
-
-                addrHint.ai_family = AF_INET;
-                addrHint.ai_socktype = SOCK_STREAM;
-                addrHint.ai_protocol = 0;
-                sprintf(portString, "%d", socket_io_instance->port);
-                LogInfo("Starting DNS lookup for %s:%d", hostname, socket_io_instance->port);
-                int addrResult = getaddrinfo(socket_io_instance->hostname, portString, &addrHint, &addrInfo);
-                if (addrResult != 0)
+                // getaddrinfo can return several addresses (e.g. AAAA then A).
+                // Try each in turn and keep the first that connects.
+                int connect_error = __FAILURE__;
+                result = __FAILURE__;
+                for (ADDRINFO* rp = addrInfo; rp != NULL; rp = rp->ai_next)
                 {
-                    open_result_detailed.code = addrResult;
-                    LogError("Failure: getaddrinfo failure %d (%s) for host %s.", open_result_detailed.code, gai_strerrorA(open_result_detailed.code), hostname);
-                    (void)closesocket(socket_io_instance->socket);
-                    socket_io_instance->socket = INVALID_SOCKET;
-                    result = __FAILURE__;
+                    if (validate_addrinfo(rp, hostname, &connect_error) != 0)
+                    {
+                        continue;
+                    }
+
+                    // Every candidate gets the same full grant. There is no
+                    // budget shared across addresses, so a run of blackholed
+                    // addresses in one family cannot exhaust the allowance and
+                    // leave the other family - often the only one that works -
+                    // unattempted. The cost is that the worst case grows with
+                    // the number of resolved addresses rather than being capped.
+                    if (connect_to_addrinfo(socket_io_instance, rp, CONNECT_TIMEOUT_PER_ADDRESS_MS, &connect_error) == 0)
+                    {
+                        result = 0;
+                        break;
+                    }
+                }
+
+                if (result == 0)
+                {
+                    socket_io_instance->on_bytes_received = on_bytes_received;
+                    socket_io_instance->on_bytes_received_context = on_bytes_received_context;
+                    socket_io_instance->on_io_error = on_io_error;
+                    socket_io_instance->on_io_error_context = on_io_error_context;
+                    socket_io_instance->io_state = IO_STATE_OPEN;
                 }
                 else
                 {
-                    u_long iMode = 1;
-
-                    {
-                        char resolved_ip[INET6_ADDRSTRLEN] = { 0 };
-                        const char* resolved_ip_str = NULL;
-                        if (addrInfo != NULL && addrInfo->ai_family == AF_INET && addrInfo->ai_addr != NULL)
-                        {
-                            struct sockaddr_in* sin = (struct sockaddr_in*)addrInfo->ai_addr;
-                            resolved_ip_str = InetNtopA(AF_INET, &sin->sin_addr, resolved_ip, sizeof(resolved_ip));
-                        }
-
-                        if (resolved_ip_str != NULL)
-                        {
-                            LogInfo("DNS resolved %s to %s, connecting to %s:%d", hostname, resolved_ip_str, hostname, socket_io_instance->port);
-                        }
-                        else
-                        {
-                            LogInfo("DNS resolved successfully, connecting to %s:%d", hostname, socket_io_instance->port);
-                        }
-                    }
-                    if (connect(socket_io_instance->socket, addrInfo->ai_addr, (int)addrInfo->ai_addrlen) != 0)
-                    {
-                        open_result_detailed.code = WSAGetLastError();
-                        LogError("Failure: connect to %s:%d failed with error %d.", hostname, socket_io_instance->port, open_result_detailed.code);
-                        (void)closesocket(socket_io_instance->socket);
-                        socket_io_instance->socket = INVALID_SOCKET;
-                        result = __FAILURE__;
-                    }
-                    else if (ioctlsocket(socket_io_instance->socket, FIONBIO, &iMode) != 0)
-                    {
-                        open_result_detailed.code = WSAGetLastError();
-                        LogError("Failure: ioctlsocket failure %d for %s:%d.", open_result_detailed.code, hostname, socket_io_instance->port);
-                        (void)closesocket(socket_io_instance->socket);
-                        socket_io_instance->socket = INVALID_SOCKET;
-                        result = __FAILURE__;
-                    }
-                    else
-                    {
-                        LogInfo("TCP connection to %s:%d established successfully.", hostname, socket_io_instance->port);
-                        socket_io_instance->on_bytes_received = on_bytes_received;
-                        socket_io_instance->on_bytes_received_context = on_bytes_received_context;
-
-                        socket_io_instance->on_io_error = on_io_error;
-                        socket_io_instance->on_io_error_context = on_io_error_context;
-
-                        socket_io_instance->io_state = IO_STATE_OPEN;
-
-                        result = 0;
-                    }
-
-                    freeaddrinfo(addrInfo);
+                    open_result_detailed.code = connect_error;
                 }
+
+                freeaddrinfo(addrInfo);
             }
         }
     }

@@ -1,5 +1,10 @@
 # Release notes
 
+## Speech SDK 1.53.0: 2026-October release
+
+- Added opt-in support for IPv6. To enable it, set `PropertyId::SpeechServiceConnection_EnableIpv6` "true".
+- Fixed a race condition in the handling of a speech synthesis request.
+
 ## Speech SDK 1.52.0: 2026-September release
 
 - Added commit support for PushAudioInputStream (preview).

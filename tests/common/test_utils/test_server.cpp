@@ -82,6 +82,7 @@ namespace Tools {
 
     TestServer::TestServer(TestServerConfig config) :
         m_port(config.m_port),
+        m_host(config.m_bindAddress.empty() ? "localhost" : HttpUtils::FormatHostForAuthority(config.m_bindAddress)),
         m_pipe(),
         m_exe()
     {
@@ -121,12 +122,12 @@ namespace Tools {
 
     std::string TestServer::HttpEndpoint() const
     {
-        return "http://localhost:" + std::to_string(m_port);
+        return "http://" + m_host + ":" + std::to_string(m_port);
     }
 
     std::string TestServer::WebSocketEndpoint() const
     {
-        return "ws://localhost:" + std::to_string(m_port);
+        return "ws://" + m_host + ":" + std::to_string(m_port);
     }
 
     std::string TestServer::HttpTime() const
@@ -245,6 +246,12 @@ namespace Tools {
         {
             startupInfo.args.push_back("--port");
             startupInfo.args.push_back(std::to_string(config.m_port));
+        }
+
+        if (!config.m_bindAddress.empty())
+        {
+            startupInfo.args.push_back("--bind");
+            startupInfo.args.push_back(config.m_bindAddress);
         }
 
         auto ppid = GetCurrentProcessId();

@@ -654,6 +654,7 @@ void CSpxUspTtsEngineAdapter::UspInitialize()
     auto uspCallbacks = SpxCreateObjectWithSite<ISpxUspCallbacks>("CSpxUspCallbackWrapper", this);
     auto clientConfiguration = USP::ClientConfiguration(uspCallbacks, USP::EndpointType::SpeechSynthesis, PAL::CreateGuidWithoutDashesUTF8())
         .SetAuthentication(authData)
+        .SetEnableIpv6(HttpUtils::IsIpv6Enabled(properties.get()))
         .SetUnderlyingOption(USP::endpoint::tcpNodelayOption, 1)
         .SetUserDefinedHttpHeaders(headers);
 

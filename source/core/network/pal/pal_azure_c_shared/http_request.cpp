@@ -15,10 +15,7 @@
 #include "http_exception.h"
 #include "i_http_adapter.h"
 #include "http_platform_impl.h"
-
-#ifdef SPEECHSDK_USE_OPENSSL
-    #include <azure_c_shared_utility/shared_util_options.h>
-#endif
+#include <azure_c_shared_utility/shared_util_options.h>
 
 /// <summary>
 /// Gets the last error code. You should call this if your HTTAPI_Execute... method returned an
@@ -192,7 +189,13 @@ namespace Impl {
         m_requestHeaders = HTTPHeaders_Alloc();
         SPX_THROW_HR_IF(SPXERR_OUT_OF_MEMORY, m_requestHeaders == nullptr);
 
-        AddHeader(m_requestHeaders, "Host", endpoint.Host().c_str());
+        auto authority = HttpUtils::FormatHostForOutgoingAuthority(host);
+        if (!endpoint.IsDefaultPort())
+        {
+            authority += ':';
+            authority += std::to_string(port);
+        }
+        AddHeader(m_requestHeaders, "Host", authority.c_str());
 
         for (const auto& h : endpoint.Headers())
         {
@@ -210,7 +213,8 @@ namespace Impl {
             proxy.host.empty() ? nullptr : proxy.host.c_str(),
             proxy.port,
             proxy.username.empty() ? nullptr : proxy.username.c_str(),
-            proxy.password.empty() ? nullptr : proxy.password.c_str());
+            proxy.password.empty() ? nullptr : proxy.password.c_str(),
+            endpoint.IsIpv6Enabled());
 
         if (result != HTTPAPI_OK)
         {

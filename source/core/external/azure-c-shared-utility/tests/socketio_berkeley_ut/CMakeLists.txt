@@ -16,6 +16,7 @@ ${theseTestsName}.c
 
 set(${theseTestsName}_c_files
 ../../adapters/socketio_berkeley.c
+../../src/host_utils.c
 )
 
 set(${theseTestsName}_h_files

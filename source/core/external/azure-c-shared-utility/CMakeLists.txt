@@ -161,6 +161,9 @@ endif()
 
 
 include_directories(${UMOCK_C_INC_FOLDER})
+# adapters/ shares host_utils.h with src/; the test targets already get this
+# folder from build_c_test_artifacts.
+include_directories(${SHARED_UTIL_SRC_FOLDER})
 
 #these are the C source files
 set(source_c_files
@@ -181,6 +184,7 @@ ${LOGGING_C_FILE}
 ./src/hmac.c
 ./src/hmacsha256.c
 ./src/http_proxy_io.c
+./src/host_utils.c
 ./src/xio.c
 ./src/singlylinkedlist.c
 ./src/map.c

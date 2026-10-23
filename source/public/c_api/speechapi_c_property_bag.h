@@ -35,6 +35,7 @@ enum  PropertyId
     SpeechServiceConnection_ProxyPassword = 1103,
     SpeechServiceConnection_Url = 1104,
     SpeechServiceConnection_ProxyHostBypass = 1105,
+    SpeechServiceConnection_EnableIpv6 = 1106,
 
     SpeechServiceConnection_TranslationToLanguages = 2000,
     SpeechServiceConnection_TranslationVoice = 2001,

@@ -16,6 +16,9 @@ typedef struct TLSIO_CONFIG_TAG
     int port;
     const IO_INTERFACE_DESCRIPTION* underlying_io_interface;
     void* underlying_io_parameters;
+    /* Passed through to the socket this TLS instance creates for itself.
+       Ignored when underlying_io_interface is supplied by the caller. */
+    int enable_ipv6;
 } TLSIO_CONFIG;
 
 #ifdef __cplusplus

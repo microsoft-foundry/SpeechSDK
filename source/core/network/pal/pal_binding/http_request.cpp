@@ -6,6 +6,7 @@
 #include "stdafx.h"
 #include "http_request.h"
 #include "http_response.h"
+#include "http_utils.h"
 #include "service_helpers.h"
 #include "../../../c_api/binding_callback_storage.h"
 #include "../../../pal/include/guid.h"
@@ -85,7 +86,13 @@ void CSpxBindingBasedHttpRequest::PopulateEventArgs(
 
     // Add Host header
     headers += "Host\n";
-    eventArgs->SetStringValue("service.transport.http.request.headers.Host", endpoint.Host().c_str());
+    auto authority = HttpUtils::FormatHostForOutgoingAuthority(endpoint.Host());
+    if (!endpoint.IsDefaultPort())
+    {
+        authority += ':';
+        authority += std::to_string(endpoint.Port());
+    }
+    eventArgs->SetStringValue("service.transport.http.request.headers.Host", authority.c_str());
 
     // Add Content-Length header
     headers += "Content-Length\n";
@@ -105,14 +112,14 @@ void CSpxBindingBasedHttpRequest::PopulateEventArgs(
     // Set content if available
     if (content != nullptr && contentSize > 0)
     {
-       
+
         if (IsTextContent(endpoint))
         {
             std::string textContent(reinterpret_cast<const char*>(content), contentSize);
             eventArgs->SetStringValue("service.transport.http.request.content", textContent.c_str());
 
             // Explicitly set content length property
-            eventArgs->SetStringValue("service.transport.http.request.content.length", 
+            eventArgs->SetStringValue("service.transport.http.request.content.length",
                 std::to_string(contentSize).c_str());
         }
         else
@@ -159,7 +166,7 @@ std::unique_ptr<ISpxHttpResponse> CSpxBindingBasedHttpRequest::PopulateResponse(
 
     // Get status code (default to 500 if not found)
     std::string statusStr = responseArgs->GetStringValue("service.transport.http.response.status", "");
-    
+
 
     try {
         // Try to parse the status code
@@ -246,8 +253,8 @@ std::unique_ptr<ISpxHttpResponse> CSpxBindingBasedHttpRequest::SendRequestStream
     // Create event args for the request
     auto requestArgs = std::make_shared<CSpxHttpEventArgs>();
 
-    SPX_TRACE_INFO("Sending streaming request: %s %s", 
-        HttpMethodToString(method).c_str(), 
+    SPX_TRACE_INFO("Sending streaming request: %s %s",
+        HttpMethodToString(method).c_str(),
         endpoint.EndpointUrl().c_str());
 
     // Populate the event args with request details
@@ -270,13 +277,13 @@ std::unique_ptr<ISpxHttpResponse> CSpxBindingBasedHttpRequest::SendRequestStream
     auto sharedResponse = std::make_shared<CSpxBindingBasedHttpResponse>();
     sharedResponse->m_dataAvailableCallback = std::move(onDataCallback);
 
-    // Register in handle table using ISpxHttpResponse interface 
+    // Register in handle table using ISpxHttpResponse interface
     SPXEVENTHANDLE responseHandle = CSpxSharedPtrHandleTableManager::TrackHandle<ISpxHttpResponse, SPXEVENTHANDLE>(sharedResponse);
 
     // Store the handle as a string in the property bag
     std::string responseHandleStr = std::to_string(reinterpret_cast<uintptr_t>(responseHandle));
     requestArgs->SetStringValue("service.transport.http.response.handle", responseHandleStr.c_str());
-    
+
     // Store the callback in our global map, keyed by the response pointer
     static std::map<void*, StreamedResponseDataHandler> callbackMap;
     callbackMap[sharedResponse.get()] = sharedResponse->m_dataAvailableCallback;
@@ -286,7 +293,7 @@ std::unique_ptr<ISpxHttpResponse> CSpxBindingBasedHttpRequest::SendRequestStream
 
     // Create a new response object to return
     auto finalResponse = PopulateResponse(requestArgs);
-    
+
     return finalResponse;
 }
 

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <map>
 #include <interfaces/i_web_socket_state.h>
@@ -37,6 +38,7 @@ namespace Tools {
 
         std::map<std::string, Mapping> m_mappings;
         uint16_t m_port{ 0 };
+        std::string m_bindAddress;
 
     public:
         /// <summary>
@@ -46,6 +48,20 @@ namespace Tools {
         TestServerConfig& SetPort(uint16_t port)
         {
             m_port = port;
+            return *this;
+        }
+
+        /// <summary>
+        /// Sets the local IP address to bind to.
+        /// </summary>
+        TestServerConfig& SetBindAddress(const std::string& bindAddress)
+        {
+            if (bindAddress.empty())
+            {
+                throw std::invalid_argument("Bind address cannot be empty");
+            }
+
+            m_bindAddress = bindAddress;
             return *this;
         }
 
@@ -84,6 +100,7 @@ namespace Tools {
     {
     private:
         uint16_t m_port;
+        std::string m_host;
         std::unique_ptr<IPipe> m_pipe;
         std::unique_ptr<IProcess> m_exe;
 

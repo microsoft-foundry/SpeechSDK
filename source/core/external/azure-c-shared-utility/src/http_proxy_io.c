@@ -14,6 +14,8 @@
 #include "azure_c_shared_utility/http_proxy_io.h"
 #include "azure_c_shared_utility/base64.h"
 #include "azure_c_shared_utility/agenttime.h"
+#include "azure_c_shared_utility/safe_math.h"
+#include "host_utils.h"
 
 typedef enum HTTP_PROXY_IO_STATE_TAG
 {
@@ -169,6 +171,7 @@ static CONCRETE_IO_HANDLE http_proxy_io_create(void* io_create_parameters)
                                     socket_io_config.hostname = http_proxy_io_config->proxy_hostname;
                                     socket_io_config.port = http_proxy_io_config->proxy_port;
                                     socket_io_config.accepted_socket = NULL;
+                                    socket_io_config.enable_ipv6 = http_proxy_io_config->enable_ipv6;
 
                                     /* Codes_SRS_HTTP_PROXY_IO_01_009: [ `http_proxy_io_create` shall create a new socket IO by calling `xio_create` with the arguments: ]*/
                                     result->underlying_io = xio_create(underlying_io_interface, &socket_io_config);
@@ -246,6 +249,56 @@ static void unchecked_on_send_complete(void* context, IO_SEND_RESULT send_result
 {
     (void)context;
     (void)send_result;
+}
+
+static int append_connect_request_segment(char* connect_request, size_t connect_request_size, size_t* connect_request_offset, const char* segment)
+{
+    int result;
+
+    if ((connect_request == NULL) || (connect_request_offset == NULL) || (segment == NULL) || (*connect_request_offset >= connect_request_size))
+    {
+        result = __LINE__;
+    }
+    else
+    {
+        size_t segment_length = strlen(segment);
+
+        if (segment_length >= (connect_request_size - *connect_request_offset))
+        {
+            result = __LINE__;
+        }
+        else
+        {
+            (void)memcpy(connect_request + *connect_request_offset, segment, segment_length);
+            *connect_request_offset += segment_length;
+            connect_request[*connect_request_offset] = '\0';
+            result = 0;
+        }
+    }
+
+    return result;
+}
+
+static int append_formatted_host_for_authority(char* connect_request, size_t connect_request_size, size_t* connect_request_offset, const char* host, size_t formatted_host_length)
+{
+    int result;
+
+    if ((connect_request == NULL) || (connect_request_offset == NULL) || (host == NULL) ||
+        (*connect_request_offset >= connect_request_size) || (formatted_host_length >= (connect_request_size - *connect_request_offset)))
+    {
+        result = __LINE__;
+    }
+    else if (format_host_for_authority(host, connect_request + *connect_request_offset, connect_request_size - *connect_request_offset) != 0)
+    {
+        result = __LINE__;
+    }
+    else
+    {
+        *connect_request_offset = safe_add_size_t(*connect_request_offset, formatted_host_length);
+        result = (*connect_request_offset == SIZE_MAX) ? __LINE__ : 0;
+    }
+
+    return result;
 }
 
 static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILED open_result_detailed)
@@ -374,11 +427,20 @@ static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILE
                 }
                 else
                 {
-                    int connect_request_length;
                     const char* auth_string_payload;
-                    /* Codes_SRS_HTTP_PROXY_IO_01_075: [ The Request-URI portion of the Request-Line is always an 'authority' as defined by URI Generic Syntax [2], which is to say the host name and port number destination of the requested connection separated by a colon: ]*/
-                    const char request_format[] = "CONNECT %s:%d HTTP/1.1\r\nHost:%s:%d%s%s\r\n\r\n";
+                    const char connect_request_prefix[] = "CONNECT ";
+                    const char connect_request_between_authority_and_port[] = ":";
+                    const char connect_request_between_authorities[] = " HTTP/1.1\r\nHost:";
                     const char proxy_basic[] = "\r\nProxy-authorization: Basic ";
+                    const char connect_request_terminator[] = "\r\n\r\n";
+                    char port_string[(sizeof(int) * CHAR_BIT) + 2];
+                    int port_string_length;
+                    size_t port_length;
+                    size_t formatted_host_length;
+                    size_t connect_request_length;
+                    size_t connect_request_size;
+                    size_t connect_request_offset;
+
                     if (http_proxy_io_instance->username != NULL)
                     {
                         auth_string_payload = STRING_c_str(encoded_auth_string);
@@ -388,63 +450,89 @@ static void on_underlying_io_open_complete(void* context, IO_OPEN_RESULT_DETAILE
                         auth_string_payload = "";
                     }
 
-                    /* Codes_SRS_HTTP_PROXY_IO_01_059: [ - If `username` and `password` have been specified in the arguments passed to `http_proxy_io_create`, then the header `Proxy-Authorization` shall be added to the request. ]*/
-
-                    connect_request_length = (int)(strlen(request_format)+(strlen(http_proxy_io_instance->hostname)*2)+strlen(auth_string_payload)+10);
-                    if (http_proxy_io_instance->username != NULL)
-                    {
-                        connect_request_length += (int)strlen(proxy_basic);
-                    }
-
-                    if (connect_request_length < 0)
+                    port_string_length = snprintf(port_string, sizeof(port_string), "%d", http_proxy_io_instance->port);
+                    if ((port_string_length < 0) || ((size_t)port_string_length >= sizeof(port_string)))
                     {
                         /* Codes_SRS_HTTP_PROXY_IO_01_062: [ If any failure is encountered while constructing the request, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
-                        LogError("Cannot encode the CONNECT request");
+                        LogError("Cannot encode the CONNECT request port");
                         open_result_detailed.code = __FAILURE__;
                         indicate_open_complete_error_and_close(http_proxy_io_instance, open_result_detailed);
                     }
                     else
                     {
-                        char* connect_request = (char*)malloc(connect_request_length + 1);
-                        if (connect_request == NULL)
+                        port_length = (size_t)port_string_length;
+                        formatted_host_length = authority_host_length(http_proxy_io_instance->hostname);
+                        connect_request_length = sizeof(connect_request_prefix) - 1;
+                        connect_request_length = safe_add_size_t(connect_request_length, formatted_host_length);
+                        connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authority_and_port) - 1);
+                        connect_request_length = safe_add_size_t(connect_request_length, port_length);
+                        connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authorities) - 1);
+                        connect_request_length = safe_add_size_t(connect_request_length, formatted_host_length);
+                        connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_between_authority_and_port) - 1);
+                        connect_request_length = safe_add_size_t(connect_request_length, port_length);
+                        if (http_proxy_io_instance->username != NULL)
+                        {
+                            connect_request_length = safe_add_size_t(connect_request_length, sizeof(proxy_basic) - 1);
+                            connect_request_length = safe_add_size_t(connect_request_length, strlen(auth_string_payload));
+                        }
+                        connect_request_length = safe_add_size_t(connect_request_length, sizeof(connect_request_terminator) - 1);
+                        connect_request_size = safe_add_size_t(connect_request_length, 1);
+
+                        if ((connect_request_length == SIZE_MAX) || (connect_request_size == SIZE_MAX))
                         {
                             /* Codes_SRS_HTTP_PROXY_IO_01_062: [ If any failure is encountered while constructing the request, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
-                            LogError("Cannot allocate memory for CONNECT request");
+                            LogError("Cannot calculate CONNECT request size");
                             open_result_detailed.code = __FAILURE__;
                             indicate_open_complete_error_and_close(http_proxy_io_instance, open_result_detailed);
                         }
                         else
                         {
-                            /* Codes_SRS_HTTP_PROXY_IO_01_059: [ - If `username` and `password` have been specified in the arguments passed to `http_proxy_io_create`, then the header `Proxy-Authorization` shall be added to the request. ]*/
-                            connect_request_length = sprintf(connect_request, request_format,
-                                http_proxy_io_instance->hostname,
-                                http_proxy_io_instance->port,
-                                http_proxy_io_instance->hostname,
-                                http_proxy_io_instance->port,
-                                (http_proxy_io_instance->username != NULL) ? proxy_basic : "",
-                                auth_string_payload);
-
-                            if (connect_request_length < 0)
+                            char* connect_request = (char*)malloc(connect_request_size);
+                            if (connect_request == NULL)
                             {
                                 /* Codes_SRS_HTTP_PROXY_IO_01_062: [ If any failure is encountered while constructing the request, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
-                                LogError("Cannot encode the CONNECT request");
+                                LogError("Cannot allocate memory for CONNECT request");
                                 open_result_detailed.code = __FAILURE__;
                                 indicate_open_complete_error_and_close(http_proxy_io_instance, open_result_detailed);
                             }
                             else
                             {
-                                LogInfo("Sending HTTP proxy CONNECT request for %s:%d (%d bytes)", http_proxy_io_instance->hostname, http_proxy_io_instance->port, connect_request_length);
-                                /* Codes_SRS_HTTP_PROXY_IO_01_063: [ The request shall be sent by calling `xio_send` and passing NULL as `on_send_complete` callback. ]*/
-                                if (xio_send(http_proxy_io_instance->underlying_io, connect_request, connect_request_length, unchecked_on_send_complete, NULL) != 0)
+                                /* Codes_SRS_HTTP_PROXY_IO_01_059: [ - If `username` and `password` have been specified in the arguments passed to `http_proxy_io_create`, then the header `Proxy-Authorization` shall be added to the request. ]*/
+                                connect_request_offset = 0;
+                                if ((append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_prefix) != 0) ||
+                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, formatted_host_length) != 0) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authority_and_port) != 0) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, port_string) != 0) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authorities) != 0) ||
+                                    (append_formatted_host_for_authority(connect_request, connect_request_size, &connect_request_offset, http_proxy_io_instance->hostname, formatted_host_length) != 0) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_between_authority_and_port) != 0) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, port_string) != 0) ||
+                                    ((http_proxy_io_instance->username != NULL) &&
+                                        ((append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, proxy_basic) != 0) ||
+                                        (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, auth_string_payload) != 0))) ||
+                                    (append_connect_request_segment(connect_request, connect_request_size, &connect_request_offset, connect_request_terminator) != 0) ||
+                                    (connect_request_offset != connect_request_length))
                                 {
-                                    /* Codes_SRS_HTTP_PROXY_IO_01_064: [ If `xio_send` fails, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
-                                    LogError("Could not send CONNECT request");
+                                    /* Codes_SRS_HTTP_PROXY_IO_01_062: [ If any failure is encountered while constructing the request, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
+                                    LogError("Cannot encode the CONNECT request");
                                     open_result_detailed.code = __FAILURE__;
                                     indicate_open_complete_error_and_close(http_proxy_io_instance, open_result_detailed);
                                 }
-                            }
+                                else
+                                {
+                                    LogInfo("Sending HTTP proxy CONNECT request for %s:%d (%zu bytes)", http_proxy_io_instance->hostname, http_proxy_io_instance->port, connect_request_length);
+                                    /* Codes_SRS_HTTP_PROXY_IO_01_063: [ The request shall be sent by calling `xio_send` and passing NULL as `on_send_complete` callback. ]*/
+                                    if (xio_send(http_proxy_io_instance->underlying_io, connect_request, connect_request_length, unchecked_on_send_complete, NULL) != 0)
+                                    {
+                                        /* Codes_SRS_HTTP_PROXY_IO_01_064: [ If `xio_send` fails, the `on_open_complete` callback shall be triggered with `IO_OPEN_ERROR`, passing also the `on_open_complete_context` argument as `context`. ]*/
+                                        LogError("Could not send CONNECT request");
+                                        open_result_detailed.code = __FAILURE__;
+                                        indicate_open_complete_error_and_close(http_proxy_io_instance, open_result_detailed);
+                                    }
+                                }
 
-                            free(connect_request);
+                                free(connect_request);
+                            }
                         }
                     }
                 }

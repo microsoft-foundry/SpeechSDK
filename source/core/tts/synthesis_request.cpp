@@ -62,8 +62,8 @@ void CSpxSynthesisRequest::SendTextPiece(const std::string& textPiece)
     SPX_THROW_HR_IF(AZAC_ERR_UNINITIALIZED, !m_initialized);
     SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, m_inputType != SynthesisRequestInputType::TextStream);
     SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, textPiece.empty());
-    SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, m_inputFinished);
     std::lock_guard<std::mutex> lock(m_textPiecesMutex);
+    SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, m_inputFinished);
     m_textPieces.push(textPiece);
     m_textPiecesCV.notify_one();
 }
@@ -72,9 +72,15 @@ void CSpxSynthesisRequest::FinishInput()
 {
     SPX_DBG_TRACE_FUNCTION();
     SPX_THROW_HR_IF(AZAC_ERR_UNINITIALIZED, !m_initialized);
-    SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, m_inputFinished);
-    m_inputFinished = true;
-    m_textPiecesCV.notify_one();
+    {
+        // m_inputFinished must be changed while holding the mutex that GetNextTextPiece() waits with.
+        // Otherwise the notification can be sent between the waiter's predicate check and its wait,
+        // and the waiter then blocks forever although the input is finished.
+        std::lock_guard<std::mutex> lock(m_textPiecesMutex);
+        SPX_THROW_HR_IF(AZAC_ERR_INVALID_ARG, m_inputFinished);
+        m_inputFinished = true;
+    }
+    m_textPiecesCV.notify_all();
 }
 
 SynthesisRequestInputType CSpxSynthesisRequest::GetInputType() const
