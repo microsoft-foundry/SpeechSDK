@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Approved PR number and exact head, base and merge SHAs
+        description: Approved PR number and exact head and base SHAs
         required: true
         type: string
 permissions:
@@ -18,7 +18,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Review/CI completion wakes this job. Main pushes also re-test approved PRs against the new base.
+  # Review/CI completion wakes this job. Main pushes also reconsider approved PRs; stale branches must be updated.
   # Dispatch fixed candidate SHAs; the same workflow then takes the prepare/test/report path.
   select:
     if: github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -53,7 +53,7 @@ jobs:
               });
             }
 
-  # Publish pending for the validated merge SHA, using only the job's automatic token.
+  # Publish pending for the validated head SHA, using only the job's automatic token.
   # Status writes share a concurrency group with report, preserving prior complete success.
   prepare:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -63,7 +63,7 @@ jobs:
       pull-requests: read
       statuses: write
     concurrency:
-      group: approved-pr-status-${{ fromJSON(inputs.candidate).merge }}
+      group: approved-pr-status-${{ fromJSON(inputs.candidate).head }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -87,10 +87,10 @@ jobs:
             const { publishStatus } = require('./.github/scripts/pr-ci.cjs');
             const candidate = JSON.parse(process.env.CANDIDATE);
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await publishStatus(github, context.repo, candidate.merge, 'pending', url);
+            await publishStatus(github, context.repo, candidate.head, 'pending', url);
 
   # Each platform revalidates approval, including on retries, before executing PR code.
-  # .ci holds trusted workflow helpers/actions; work holds the exact merge candidate.
+  # .ci holds trusted workflow helpers/actions; work holds the exact reviewed PR head.
   # These jobs receive service credentials, but no status-writing permission.
   test:
     needs: prepare
@@ -120,14 +120,14 @@ jobs:
             await validateCandidate(github, context.repo, JSON.parse(process.env.CANDIDATE));
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ fromJSON(inputs.candidate).merge }}
+          ref: ${{ fromJSON(inputs.candidate).head }}
           path: work
           persist-credentials: false
       - name: Verify candidate checkout
         shell: bash
         working-directory: work
         env:
-          EXPECTED_SHA: ${{ fromJSON(inputs.candidate).merge }}
+          EXPECTED_SHA: ${{ fromJSON(inputs.candidate).head }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       # Build once per platform, then run all offline/online tests and sample scenarios.
       - name: Build and test
@@ -151,7 +151,7 @@ jobs:
       pull-requests: read
       statuses: write
     concurrency:
-      group: approved-pr-status-${{ fromJSON(inputs.candidate).merge }}
+      group: approved-pr-status-${{ fromJSON(inputs.candidate).head }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -177,6 +177,6 @@ jobs:
             const candidate = JSON.parse(process.env.CANDIDATE);
             const passed = process.env.TEST_RESULT === 'success';
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await publishStatus(github, context.repo, candidate.merge, passed ? 'success' : 'failure', url);
+            await publishStatus(github, context.repo, candidate.head, passed ? 'success' : 'failure', url);
             // Include this job when GitHub reruns failed jobs and their dependents.
             if (!passed) core.setFailed('Required platform tests did not pass.');
