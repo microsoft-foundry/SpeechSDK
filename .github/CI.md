@@ -8,7 +8,7 @@
 | [workflows/pr-review-notify.yml](workflows/pr-review-notify.yml) | Notification of submitted, edited, or dismissed reviews |
 | [workflows/pr-approved-tests.yml](workflows/pr-approved-tests.yml) | Candidate selection, automatic dispatch, approved execution, and commit-status reporting |
 | [actions/sdk-ci/action.yml](actions/sdk-ci/action.yml) | Shared build, core tests, samples, artifacts, and failure handling |
-| [scripts/pr-ci.cjs](scripts/pr-ci.cjs) | Resolve an approved candidate and validate its identity |
+| [scripts/pr-ci.cjs](scripts/pr-ci.cjs) | Assess candidate eligibility and identity, and preserve completed test statuses |
 
 Builds use Release configuration on Linux x64, macOS arm64, and Windows x64.
 
@@ -32,7 +32,7 @@ The selector uses PRs associated with the triggering workflow run when available
 
 `approvedCandidate()` requires an open, non-draft, mergeable PR targeting this repository's main, GitHub's required-review decision `APPROVED`, and agreement between the review query and PR head SHA. It verifies that the base is the current main tip and uses an immutable-SHA commit comparison to require that this base is an ancestor of the head. It checks main again after the comparison to reject a base that advanced during that request.
 
-Each eligible candidate is automatically dispatched to the same workflow as `{ pr, head, base }`. Maintainers do not perform a separate dispatch or environment approval. Selection does not deduplicate dispatches, so repeated notifications can start redundant runs.
+Each eligible candidate is automatically dispatched to the same workflow as `{ pr, head, base }`. Maintainers do not perform a separate dispatch or environment approval. Selection skips heads that already have a complete `approved-pr-tests` success. Pending or failed results do not suppress dispatch: they may belong to interrupted runs. Concurrent in-flight candidates are not deduplicated, so repeated notifications can still start redundant runs.
 
 ### Approved candidate execution
 
@@ -42,15 +42,15 @@ Main-ref workflow_dispatch events enter the following path; the selector invokes
 prepare -> test-Linux / test-macOS / test-Windows -> report
 ```
 
-1. **prepare:** Revalidates the candidate and publishes a pending commit status named `approved-pr-tests` on the selected PR head SHA using its automatic `GITHUB_TOKEN`. An existing complete success for that SHA is preserved.
-2. **test:** Each platform revalidates approval and candidate identity before checking out PR code, then verifies the checkout SHA. Trusted helper/action code comes from the workflow revision in `.ci`; the reviewed PR head is checked out into `work`. Each platform builds once and runs combined core tests and all six samples. These jobs receive service credentials, but no status-writing permission.
-3. **report:** A separate runner revalidates the candidate and publishes success or failure for the same status context and PR head SHA, based on the matrix result. It does not execute PR code or consume PR build artifacts. A non-success matrix result also fails the reporting job.
+1. **prepare:** Assesses the candidate. Obsolete candidates and heads with an existing complete success are logged and skipped through an explicit job output; no test matrix or reporter is started. Otherwise it publishes a pending commit status named `approved-pr-tests` on the selected PR head SHA using its automatic `GITHUB_TOKEN`.
+2. **test:** Each platform revalidates approval and candidate identity before checking out PR code, then verifies the checkout SHA. If preflight rejects the candidate, all PR-code steps are skipped and the platform job explicitly fails: skipped tests must not count as passed if eligibility returns before reporting. Trusted helper/action code comes from the workflow revision in `.ci`; the reviewed PR head is checked out into `work`. Each platform builds once and runs combined core tests and all six samples. These jobs receive service credentials, but no status-writing permission.
+3. **report:** A separate runner assesses the candidate immediately before publication. For an eligible candidate it publishes success or failure for the same status context and PR head SHA, based on the matrix result. For an obsolete candidate it logs the reason and publishes nothing, without failing merely because the PR has merged, closed, changed head/base, or lost approval. It does not execute PR code or consume PR build artifacts. For an eligible candidate, a non-success matrix result also fails the reporting job.
 
 ## Updates, retries, and results
 
-A PR-head update must satisfy the required review policy again and receives its own test results. If main advances beyond the PR branch, update the branch by merging or rebasing main before it is eligible for approved testing and merging. An in-flight run rejects changed head/base identities rather than certifying a new candidate. Preparation, every platform job, and reporting repeat candidate validation, including on retries; they fail rather than silently switch revisions.
+A PR-head update must satisfy the required review policy again and receives its own test results. If main advances beyond the PR branch, update the branch by merging or rebasing main before it is eligible for approved testing and merging. An in-flight run rejects changed head/base identities rather than certifying a new candidate. Preparation, every platform job, and reporting repeat candidate assessment, including on retries; none silently switch revisions. Preparation and reporting treat expected lifecycle changes as explicit no-op outcomes, never as test success. Platform preflight rejection remains a failure so that an unexecuted build cannot certify a subsequently eligible candidate. Malformed inputs, API errors, and unexpected responses remain visible failures, not lifecycle skips.
 
-Failed-job retries use Actions dependencies and `needs.test.result`, not custom job-history aggregation. The platform matrix has fail-fast disabled, and the reporter fails when the matrix is not successful so that it participates in failed-job retries.
+Failed-job retries use Actions dependencies and `needs.test.result`, not custom job-history aggregation. The platform matrix has fail-fast disabled, and an eligible candidate's reporter fails when the matrix is not successful so that it participates in failed-job retries.
 
 Preparation and reporting serialize status writes for the same head SHA. A complete success for that immutable source is preserved during redundant runs. Strict up-to-date branch protection independently prevents merging a stale head; a branch update produces a new head requiring its own tests. Missing reporting cannot establish a new success; a pending status remains pending until a result is published.
 
@@ -67,7 +67,7 @@ Maintainer approval authorizes PR test execution with service credentials. Branc
 
 ## Validation
 
-Run `node --test .github/scripts/pr-ci.test.cjs` for mocked helper tests and static workflow-wiring assertions. These do not prove GitHub's live approval, required-status, or merge behavior.
+Run `node --test .github/scripts/pr-ci.test.cjs` for mocked helper tests, execution of the actual trusted `github-script` bodies with mocked bindings, and static workflow-wiring assertions. These do not prove GitHub's live approval, required-status, or merge behavior.
 
 When changing CI workflows or repository protection settings, validate the following behavior using an external-fork PR with all required checks enforced:
 
@@ -77,6 +77,7 @@ When changing CI workflows or repository protection settings, validate the follo
 4. Advancing main blocks a stale branch. Updating that branch and satisfying the review policy permits tests of the new head.
 5. A failed or cancelled matrix cannot establish a new success. Failed-job retries can recover the same candidate.
 6. Temporary merge SHA regeneration leaves the head result usable, and the PR can actually be merged with protection enforced.
+7. A PR that merges or closes while redundant tests run causes reporting to log a skip without changing statuses. A platform rejected before execution cannot count as passed if eligibility returns before reporting.
 
 Approved runs use trusted workflow code from main. Validate changes to that code after it reaches main; testing a PR checkout alone does not exercise the trusted execution path.
 

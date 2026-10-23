@@ -38,7 +38,7 @@ jobs:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const { approvedCandidate } = require('./.github/scripts/pr-ci.cjs');
+            const { approvedCandidate, hasSuccessfulTests } = require('./.github/scripts/pr-ci.cjs');
             const repo = context.repo;
             // Fork notifications may lack associated PRs; fall back to open main-target PRs.
             const associated = context.payload.workflow_run?.pull_requests;
@@ -46,14 +46,14 @@ jobs:
               github.rest.pulls.list, { ...repo, state: 'open', base: 'main' });
             for (const pr of prs) {
               const candidate = await approvedCandidate(github, repo, pr.number);
-              if (!candidate) continue;
+              if (!candidate || await hasSuccessfulTests(github, repo, candidate.head)) continue;
               await github.rest.actions.createWorkflowDispatch({
                 ...repo, workflow_id: 'pr-approved-tests.yml', ref: 'main',
                 inputs: { candidate: JSON.stringify(candidate) }
               });
             }
 
-  # Publish pending for the validated head SHA, using only the job's automatic token.
+  # Skip obsolete or completed candidates; otherwise publish pending with the automatic token.
   # Status writes share a concurrency group with report, preserving prior complete success.
   prepare:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
@@ -62,6 +62,8 @@ jobs:
       contents: read
       pull-requests: read
       statuses: write
+    outputs:
+      run: ${{ steps.candidate.outputs.run }}
     concurrency:
       group: approved-pr-status-${{ fromJSON(inputs.candidate).head }}
       cancel-in-progress: false
@@ -70,15 +72,28 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Validate approved candidate
+      - name: Assess approved candidate
+        id: candidate
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CANDIDATE: ${{ inputs.candidate }}
         with:
           script: |
-            const { validateCandidate } = require('./.github/scripts/pr-ci.cjs');
-            await validateCandidate(github, context.repo, JSON.parse(process.env.CANDIDATE));
+            const { assessCandidate, hasSuccessfulTests } = require('./.github/scripts/pr-ci.cjs');
+            const candidate = JSON.parse(process.env.CANDIDATE);
+            const assessment = await assessCandidate(github, context.repo, candidate);
+            core.setOutput('run', 'false');
+            if (!assessment.eligible) {
+              core.info(`PR #${candidate.pr}: skipping preparation (${assessment.reason}).`);
+              return;
+            }
+            if (await hasSuccessfulTests(github, context.repo, candidate.head)) {
+              core.info(`PR #${candidate.pr}: tests already succeeded for this head.`);
+              return;
+            }
+            core.setOutput('run', 'true');
       - name: Initialize required status
+        if: steps.candidate.outputs.run == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CANDIDATE: ${{ inputs.candidate }}
@@ -94,6 +109,7 @@ jobs:
   # These jobs receive service credentials, but no status-writing permission.
   test:
     needs: prepare
+    if: needs.prepare.outputs.run == 'true'
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
     environment: speech-ci
@@ -110,20 +126,29 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: .ci
           persist-credentials: false
-      - name: Validate approved candidate
+      - name: Assess approved candidate
+        id: candidate
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CANDIDATE: ${{ inputs.candidate }}
         with:
           script: |
-            const { validateCandidate } = require('./.ci/.github/scripts/pr-ci.cjs');
-            await validateCandidate(github, context.repo, JSON.parse(process.env.CANDIDATE));
+            const { assessCandidate } = require('./.ci/.github/scripts/pr-ci.cjs');
+            const candidate = JSON.parse(process.env.CANDIDATE);
+            const assessment = await assessCandidate(github, context.repo, candidate);
+            core.setOutput('eligible', assessment.eligible ? 'true' : 'false');
+            if (!assessment.eligible) {
+              // A skipped build must not count as passed if eligibility returns before reporting.
+              core.setFailed(`PR #${candidate.pr}: tests not authorized (${assessment.reason}).`);
+            }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.candidate.outputs.eligible == 'true'
         with:
           ref: ${{ fromJSON(inputs.candidate).head }}
           path: work
           persist-credentials: false
       - name: Verify candidate checkout
+        if: steps.candidate.outputs.eligible == 'true'
         shell: bash
         working-directory: work
         env:
@@ -131,6 +156,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       # Build once per platform, then run all offline/online tests and sample scenarios.
       - name: Build and test
+        if: steps.candidate.outputs.eligible == 'true'
         uses: ./.ci/.github/actions/sdk-ci
         with:
           test-lane: all
@@ -141,9 +167,9 @@ jobs:
           subscription-key: ${{ secrets.SPEECH_SUBSCRIPTION_KEY }}
 
   # Report from a separate trusted runner, without executing PR code or consuming its artifacts.
-  # Run after failed platform jobs too; fail this job so it participates in failed-job retries.
+  # Run after failed platforms too; fail eligible results for retries, but skip obsolete candidates.
   report:
-    if: always() && github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success'
+    if: always() && github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' && needs.prepare.outputs.run == 'true'
     needs: [prepare, test]
     runs-on: ubuntu-24.04
     permissions:
@@ -158,14 +184,6 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Validate current candidate
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          CANDIDATE: ${{ inputs.candidate }}
-        with:
-          script: |
-            const { validateCandidate } = require('./.github/scripts/pr-ci.cjs');
-            await validateCandidate(github, context.repo, JSON.parse(process.env.CANDIDATE));
       - name: Publish test result
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -173,8 +191,13 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
         with:
           script: |
-            const { publishStatus } = require('./.github/scripts/pr-ci.cjs');
+            const { assessCandidate, publishStatus } = require('./.github/scripts/pr-ci.cjs');
             const candidate = JSON.parse(process.env.CANDIDATE);
+            const assessment = await assessCandidate(github, context.repo, candidate);
+            if (!assessment.eligible) {
+              core.info(`PR #${candidate.pr}: skipping report (${assessment.reason}); no status changed.`);
+              return;
+            }
             const passed = process.env.TEST_RESULT === 'success';
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await publishStatus(github, context.repo, candidate.head, passed ? 'success' : 'failure', url);

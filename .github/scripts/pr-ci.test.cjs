@@ -4,7 +4,8 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { readFileSync } = require('node:fs');
-const { approvedCandidate, validateCandidate, publishStatus } = require('./pr-ci.cjs');
+const { approvedCandidate, validateCandidate, assessCandidate, hasSuccessfulTests, publishStatus } = require('./pr-ci.cjs');
+const { runInNewContext } = require('node:vm');
 
 const repo = { owner: 'owner', repo: 'sdk' };
 const candidate = { pr: 7, head: 'a'.repeat(40), base: 'b'.repeat(40) };
@@ -191,6 +192,10 @@ test('workflow checks out and reports the head with isolated trusted reporting',
     const testJob = workflow.split('\n  test:')[1].split('\n  report:')[0];
     assert.doesNotMatch(testJob, /statuses: write/);
     assert.match(testJob, /uses: \.\/\.ci\/\.github\/actions\/sdk-ci/);
+    assert.match(testJob, /if: needs\.prepare\.outputs\.run == 'true'/);
+    assert.equal((testJob.match(/if: steps\.candidate\.outputs\.eligible == 'true'/g) || []).length, 3);
+    assert.match(workflow, /run: \$\{\{ steps\.candidate\.outputs\.run \}\}/);
+    assert.match(workflow, /if: steps\.candidate\.outputs\.run == 'true'/);
     const reportJob = workflow.split('\n  report:')[1];
     assert.match(reportJob, /statuses: write/);
     assert.doesNotMatch(reportJob, /secrets\.|download-artifact|path: work/);
@@ -206,4 +211,165 @@ test('offline workflow explicitly checks out the PR head and runs these tests', 
     assert.match(offline, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
     assert.match(offline, /node --test \.github\/scripts\/pr-ci\.test\.cjs/);
     assert.doesNotMatch(offline, /secrets\.|environment:|statuses: write/);
+});
+
+// Execute the actual trusted github-script bodies with mocked GitHub/core bindings.
+function workflowScripts() {
+    const workflow = readFileSync(`${__dirname}/../workflows/pr-approved-tests.yml`, 'utf8');
+    return [...workflow.matchAll(/          script: \|\r?\n((?:            [^\r\n]*\r?\n|\r?\n)+)/g)]
+        .map(match => match[1].replace(/^            /gm, ''));
+}
+async function executeScript(script, github, result = 'success') {
+    const outputs = {};
+    const messages = [];
+    const failures = [];
+    await runInNewContext(`(async () => { ${script}\n })()`, {
+        github, context: { repo, serverUrl: 'https://example.test', runId: 42 },
+        process: { env: { CANDIDATE: JSON.stringify(candidate), TEST_RESULT: result } },
+        require: () => require('./pr-ci.cjs'),
+        core: {
+            setOutput: (key, value) => { outputs[key] = value; },
+            info: message => { messages.push(message); },
+            setFailed: message => { failures.push(message); }
+        }
+    });
+    return { outputs, messages, failures };
+}
+
+test('assessment classifies lifecycle changes without authorizing them', async () => {
+    const { github, pr, review, main } = fixture();
+    assert.equal((await assessCandidate(github, repo, candidate)).eligible, true);
+    pr.state = 'closed';
+    pr.merged = true;
+    pr.mergeable = null;
+    assert.equal((await assessCandidate(github, repo, candidate)).reason, 'merged');
+    pr.merged = false;
+    assert.equal((await assessCandidate(github, repo, candidate)).reason, 'closed');
+    pr.state = 'open';
+    pr.mergeable = true;
+    pr.head.sha = 'd'.repeat(40);
+    assert.equal((await assessCandidate(github, repo, candidate)).reason, 'head-changed');
+    pr.head.sha = candidate.head;
+    main.object.sha = 'd'.repeat(40);
+    assert.equal((await assessCandidate(github, repo, candidate)).reason, 'base-changed');
+    main.object.sha = candidate.base;
+    review.reviewDecision = 'REVIEW_REQUIRED';
+    assert.equal((await assessCandidate(github, repo, candidate)).reason, 'approval-missing');
+});
+
+test('assessment throws for malformed inputs, API errors and unexpected responses', async () => {
+    const { github, pr } = fixture();
+    await assert.rejects(assessCandidate(github, repo, { ...candidate, head: 'main' }), /Invalid candidate/);
+    pr.state = 'unexpected';
+    await assert.rejects(assessCandidate(github, repo, candidate), /Unexpected/);
+    pr.state = 'open';
+    pr.head.sha = 'main';
+    await assert.rejects(assessCandidate(github, repo, candidate), /Unexpected/);
+    pr.head.sha = candidate.head;
+    github.rest.pulls.get = async () => { throw new Error('API unavailable'); };
+    await assert.rejects(assessCandidate(github, repo, candidate), /API unavailable/);
+});
+
+test('completed-success lookup does not mistake pending, failure or another context for success', async () => {
+    for (const state of ['pending', 'failure', 'error']) {
+        const { github } = statusFixture([{ context: 'approved-pr-tests', state }]);
+        assert.equal(await hasSuccessfulTests(github, repo, candidate.head), false);
+    }
+    assert.equal(await hasSuccessfulTests(statusFixture([{ context: 'other', state: 'success' }]).github, repo, candidate.head), false);
+    assert.equal(await hasSuccessfulTests(statusFixture([{ context: 'approved-pr-tests', state: 'success' }]).github, repo, candidate.head), true);
+});
+
+test('actual preparation script skips obsolete and completed candidates; gates live candidates', async () => {
+    const script = workflowScripts().find(s => s.includes("setOutput('run'"));
+    assert.ok(script, 'preparation must expose an explicit run output');
+    const { github, pr } = fixture();
+    Object.assign(github.rest.repos, statusFixture().github.rest.repos);
+    github.paginate = async method => method();
+    assert.equal((await executeScript(script, github)).outputs.run, 'true');
+    pr.state = 'closed';
+    assert.notEqual((await executeScript(script, github)).outputs.run, 'true');
+    pr.state = 'open';
+    github.paginate = async () => [{ context: 'approved-pr-tests', state: 'success' }];
+    assert.notEqual((await executeScript(script, github)).outputs.run, 'true');
+});
+
+test('actual platform preflight skips PR code after approval dismissal', async () => {
+    const script = workflowScripts().find(s => s.includes("setOutput('eligible'"));
+    assert.ok(script);
+    const { github, review } = fixture();
+    assert.equal((await executeScript(script, github)).outputs.eligible, 'true');
+    review.reviewDecision = 'REVIEW_REQUIRED';
+    const skipped = await executeScript(script, github);
+    assert.equal(skipped.outputs.eligible, 'false');
+    assert.equal(skipped.failures.length, 1, 'a skipped build cannot look like passed tests');
+    github.graphql = async () => { throw new Error('API unavailable'); };
+    await assert.rejects(executeScript(script, github), /API unavailable/);
+});
+
+test('actual reporter leaves status untouched after merge, close, head/base change or dismissed approval', async () => {
+    const script = workflowScripts().find(s => s.includes('TEST_RESULT'));
+    assert.ok(script);
+    for (const change of ['merged', 'closed', 'head', 'base', 'approval']) {
+        const { github, pr, main, review } = fixture();
+        const status = statusFixture();
+        Object.assign(github.rest.repos, status.github.rest.repos);
+        github.paginate = status.github.paginate;
+        if (change === 'merged' || change === 'closed') {
+            pr.state = 'closed'; pr.merged = change === 'merged';
+        }
+        if (change === 'head') pr.head.sha = 'd'.repeat(40);
+        if (change === 'base') main.object.sha = 'd'.repeat(40);
+        if (change === 'approval') review.reviewDecision = 'REVIEW_REQUIRED';
+        const outcome = await executeScript(script, github);
+        assert.equal(status.writes.length, 0, change);
+        assert.equal(outcome.failures.length, 0, change);
+        assert.ok(outcome.messages.length, change);
+    }
+});
+
+test('actual reporter reports eligible failures/cancellations and propagates API errors', async () => {
+    const script = workflowScripts().find(s => s.includes('TEST_RESULT'));
+    for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
+        const { github } = fixture();
+        const status = statusFixture();
+        Object.assign(github.rest.repos, status.github.rest.repos);
+        github.paginate = status.github.paginate;
+        const outcome = await executeScript(script, github, result);
+        assert.equal(status.writes[0].state, result === 'success' ? 'success' : 'failure');
+        assert.equal(outcome.failures.length, result === 'success' ? 0 : 1);
+    }
+    const { github } = fixture();
+    github.rest.pulls.get = async () => { throw new Error('API unavailable'); };
+    await assert.rejects(executeScript(script, github), /API unavailable/);
+});
+
+test('approval restored after a rejected platform cannot certify skipped tests', async () => {
+    const scripts = workflowScripts();
+    const { github, review } = fixture();
+    const status = statusFixture();
+    Object.assign(github.rest.repos, status.github.rest.repos);
+    github.paginate = status.github.paginate;
+    review.reviewDecision = 'REVIEW_REQUIRED';
+    const platform = await executeScript(scripts.find(s => s.includes("setOutput('eligible'")), github);
+    assert.equal(platform.failures.length, 1);
+    review.reviewDecision = 'APPROVED';
+    const report = await executeScript(scripts.find(s => s.includes('TEST_RESULT')), github, 'failure');
+    assert.equal(status.writes[0].state, 'failure');
+    assert.equal(report.failures.length, 1);
+});
+
+test('actual selector deduplicates completed success but not stale pending or failed runs', async () => {
+    const script = workflowScripts()[0];
+    for (const state of ['success', 'pending', 'failure', null]) {
+        const { github } = fixture();
+        let dispatched = 0;
+        github.rest.actions = { createWorkflowDispatch: async () => { dispatched++; } };
+        github.rest.repos.listCommitStatusesForRef = async () => state ? [{ context: 'approved-pr-tests', state }] : [];
+        github.paginate = async method => method();
+        await runInNewContext(`(async () => { ${script}\n })()`, {
+            github, context: { repo, payload: { workflow_run: { pull_requests: [{ number: 7 }] } } },
+            require: () => require('./pr-ci.cjs')
+        });
+        assert.equal(dispatched, state === 'success' ? 0 : 1);
+    }
 });
