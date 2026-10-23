@@ -2,7 +2,7 @@
 
 // Candidate checks shared by selection, preparation, platform preflight, and reporting.
 // Loaded through actions/github-script from trusted workflow code on main, not the PR checkout.
-// Stale approval dismissal must be enabled in the repository's PR protection.
+// Stale approval dismissal and strict up-to-date branches must be enabled in PR protection.
 async function approvedCandidate(github, repo, number) {
     if (!Number.isSafeInteger(number) || number < 1) {
         throw new Error('Invalid PR number');
@@ -35,31 +35,39 @@ async function approvedCandidate(github, repo, number) {
         return null;
     }
 
-    // Bind tests to the current main tip and the merge of that base with the reviewed head.
+    // Test the reviewed head itself, only when it already contains current main.
+    // GitHub can regenerate its temporary merge commit without changing source content.
     const { data: main } = await github.rest.git.getRef({ ...repo, ref: 'heads/main' });
-    const { data: merge } = await github.rest.git.getCommit({ ...repo, commit_sha: pr.merge_commit_sha });
-    if (main.object.sha !== pr.base.sha || merge.parents.length !== 2 ||
-        merge.parents[0].sha !== pr.base.sha || merge.parents[1].sha !== pr.head.sha) {
+    if (main.object.sha !== pr.base.sha) return null;
+    const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+        ...repo, basehead: `${pr.base.sha}...${pr.head.sha}`
+    });
+    if (!['ahead', 'identical'].includes(comparison.status) ||
+        comparison.merge_base_commit.sha !== pr.base.sha) {
         return null;
     }
-    return { pr: number, head: pr.head.sha, base: pr.base.sha, merge: pr.merge_commit_sha };
+    // Do not select a stale base if main advanced during the comparison request.
+    const { data: latestMain } = await github.rest.git.getRef({ ...repo, ref: 'heads/main' });
+    if (latestMain.object.sha !== pr.base.sha) return null;
+    return { pr: number, head: pr.head.sha, base: pr.base.sha };
 }
 
 // Execution and reporting must match the dispatched identities, including on job retries.
-// Throw on a changed candidate instead of silently adopting newer head/base/merge SHAs.
+// Throw on changed head/base SHAs; temporary merge SHA regeneration is irrelevant.
 async function validateCandidate(github, repo, expected) {
-    if (!expected || !['head', 'base', 'merge'].every(key => /^[0-9a-f]{40}$/.test(expected[key] || ''))) {
+    if (!expected || !['head', 'base'].every(key => /^[0-9a-f]{40}$/.test(expected[key] || ''))) {
         throw new Error('Invalid candidate SHAs');
     }
     const current = await approvedCandidate(github, repo, expected.pr);
-    if (!current || ['head', 'base', 'merge'].some(key => current[key] !== expected[key])) {
+    if (!current || ['head', 'base'].some(key => current[key] !== expected[key])) {
         throw new Error('Candidate changed or required approval is missing');
     }
     return current;
 }
 
-// Called only in prepare/report, whose jobs serialize writes for the same merge SHA.
-// A complete success remains valid when an unchanged candidate is run again.
+// Called only in prepare/report, whose jobs serialize writes for the same head SHA.
+// A complete success for that immutable source remains valid during redundant runs.
+// Strict branch protection independently blocks a head that no longer contains main.
 async function publishStatus(github, repo, sha, state, url) {
     const context = 'approved-pr-tests';
     const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
